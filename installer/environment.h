@@ -21,10 +21,16 @@ typedef enum JvmanEnvironmentStatus {
     JVMAN_ENV_TOO_LONG,
     JVMAN_ENV_NO_MEMORY,
     JVMAN_ENV_WIN32_ERROR,
+    JVMAN_ENV_ACCESS_DENIED,
     JVMAN_ENV_METADATA_INVALID,
     JVMAN_ENV_CONFLICT,
     JVMAN_ENV_UNSUPPORTED
 } JvmanEnvironmentStatus;
+
+typedef enum JvmanEnvironmentScope {
+    JVMAN_ENV_SCOPE_USER = 0,
+    JVMAN_ENV_SCOPE_MACHINE = 1
+} JvmanEnvironmentScope;
 
 /* Values persisted below HKCU\\Software\\jvman\\Installer. */
 typedef struct JvmanInstallerMetadata {
@@ -35,7 +41,9 @@ typedef struct JvmanInstallerMetadata {
 
     /* Each PATH entry is tracked independently. */
     int app_path_owned;
+    uint32_t app_path_scope;
     int java_path_owned;
+    uint32_t java_path_scope;
 
     int java_home_owned;
     int java_home_prior_present;
@@ -63,9 +71,11 @@ JvmanEnvironmentStatus jvman_installer_metadata_delete(void);
  * one.  changed_out reports whether the registry value was written.
  */
 JvmanEnvironmentStatus jvman_environment_add_path(
-    const wchar_t *directory, int prior_owned, int *owned_out, int *changed_out);
+    JvmanEnvironmentScope scope, const wchar_t *directory, int prior_owned,
+    int *owned_out, int *changed_out);
 JvmanEnvironmentStatus jvman_environment_remove_path(
-    const wchar_t *directory, int owned, int *changed_out);
+    JvmanEnvironmentScope scope, const wchar_t *directory, int owned,
+    int *changed_out);
 
 /* Configure and restore the per-user JAVA_HOME value. */
 JvmanEnvironmentStatus jvman_environment_configure_java_home(

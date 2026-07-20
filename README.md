@@ -15,8 +15,8 @@ does not require administrator privileges or Developer Mode.
 After building, place `jvman.exe` in a user-writable directory on `PATH`, or
 run it as `.\jvman.exe`. The `jvman` CLI does not edit the registry, the system
 `PATH`, or shell profile files automatically. On Windows, the optional
-`jvman-setup.exe` bundle below can configure the current user's environment after
-an explicit choice.
+`jvman-setup.exe` bundle below can configure the current-user or system `PATH`
+after an explicit choice.
 
 ## Features
 
@@ -65,8 +65,9 @@ with CMake it is `<build>\jvman-setup.exe`.
 
 ## Windows Installer
 
-`jvman-setup.exe` is a per-user native Win32 installer. It does not request
-administrator privileges or write machine-wide settings. The default locations
+`jvman-setup.exe` is a native Win32 installer. By default it installs for the
+current user and does not request administrator privileges; choosing the system
+`PATH` requires running the installer as administrator. The default locations
 are:
 
 | Item | Default |
@@ -76,16 +77,16 @@ are:
 | Registry state | `HKCU\Software\jvman\Installer` |
 
 When started without switches, the installer asks whether to add the program
-directory to the current-user `PATH`, whether a valid `current` JDK should
-provide `JAVA_HOME` and `current\bin`, and whether to run
-`jvman discover --register`. Existing `PATH` entries are retained and exact
-or canonical duplicates are not added. The installer never changes the
-system `PATH`.
+directory to `PATH`, whether those PATH entries should be written for only the
+current user or for all users, whether a valid `current` JDK should provide
+`JAVA_HOME` and `current\bin`, and whether to run `jvman discover --register`.
+Existing `PATH` entries are retained and exact or canonical duplicates are not
+added.
 
 The normal command-line switches are:
 
 ```text
-jvman-setup.exe /S [/DIR=<absolute-directory>] [/NO_PATH]
+jvman-setup.exe /S [/DIR=<absolute-directory>] [/USER_PATH|/SYSTEM_PATH] [/NO_PATH]
 jvman-setup.exe /CONFIGURE_JAVA [/REPLACE_JAVA_HOME]
 jvman-setup.exe /DISCOVER
 jvman-setup.exe /PORTABLE /DIR=<absolute-directory>
@@ -94,8 +95,11 @@ jvman-setup.exe /HELP
 ```
 
 `/S`, `/SILENT`, and `/QUIET` suppress dialogs. `/ADD_TO_PATH` explicitly
-enables the user `PATH` update; `/NO_PATH` (or `/NO_ADD_TO_PATH`) disables it
-and removes a PATH entry previously owned by this installer on upgrade.
+enables the PATH update. `/USER_PATH` writes PATH entries to the current-user
+environment and is the default; `/SYSTEM_PATH` (also `/MACHINE_PATH` or
+`/ALL_USERS_PATH`) writes PATH entries to the machine environment and requires
+administrator permission. `/NO_PATH` (or `/NO_ADD_TO_PATH`) disables PATH
+updates and removes a PATH entry previously owned by this installer on upgrade.
 `/CONFIGURE_JAVA` is opt-in and requires `<data-home>\current\bin\java.exe`
 and `javac.exe`; without
 `/REPLACE_JAVA_HOME`, a different existing `JAVA_HOME` is treated as a conflict

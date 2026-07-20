@@ -45,7 +45,7 @@ $env:Path = 'C:\msys64\ucrt64\bin;' + $env:Path
 mingw32-make.exe
 ```
 
-构建后可直接运行 `.\jvman.exe`，也可以把它放入一个用户可写且已加入 `PATH` 的目录。`jvman` 命令行本身不会自动修改注册表、系统 `PATH` 或 PowerShell profile。Windows 构建还会生成可选的 `jvman-setup.exe`，在用户明确确认后才会配置当前用户环境变量；Make 产物位于 `.\jvman-setup.exe`，CMake 产物位于 `<build>\jvman-setup.exe`。
+构建后可直接运行 `.\jvman.exe`，也可以把它放入一个用户可写且已加入 `PATH` 的目录。`jvman` 命令行本身不会自动修改注册表、系统 `PATH` 或 PowerShell profile。Windows 构建还会生成可选的 `jvman-setup.exe`，在用户明确确认后可配置当前用户或系统 `PATH`；Make 产物位于 `.\jvman-setup.exe`，CMake 产物位于 `<build>\jvman-setup.exe`。
 
 ## Windows 安装程序
 
@@ -57,12 +57,12 @@ mingw32-make.exe
 | jvman 数据 | `%LOCALAPPDATA%\jvman`（或有效的 `JVMAN_HOME`） |
 | 安装器状态 | `HKCU\Software\jvman\Installer` |
 
-不带参数启动时，安装器会依次询问是否把程序目录加入当前用户 `PATH`、是否用有效的 `current` JDK 配置 `JAVA_HOME` 与 `current\bin`，以及是否在安装后执行 `jvman discover --register`。已有 `PATH` 项会保留，精确或规范化后的重复项不会再次加入；系统级 `PATH` 永远不会被修改。
+不带参数启动时，安装器会依次询问是否把程序目录加入 `PATH`、PATH 项写入“仅当前用户”还是“所有用户”、是否用有效的 `current` JDK 配置 `JAVA_HOME` 与 `current\bin`，以及是否在安装后执行 `jvman discover --register`。已有 `PATH` 项会保留，精确或规范化后的重复项不会再次加入；写入系统 `PATH` 需要以管理员身份运行安装器。
 
 常用命令行参数：
 
 ```text
-jvman-setup.exe /S [/DIR=<绝对路径>] [/NO_PATH]
+jvman-setup.exe /S [/DIR=<绝对路径>] [/USER_PATH|/SYSTEM_PATH] [/NO_PATH]
 jvman-setup.exe /CONFIGURE_JAVA [/REPLACE_JAVA_HOME]
 jvman-setup.exe /DISCOVER
 jvman-setup.exe /PORTABLE /DIR=<绝对路径>
@@ -70,7 +70,7 @@ jvman-setup.exe /UNINSTALL [/S]
 jvman-setup.exe /HELP
 ```
 
-`/S`、`/SILENT` 和 `/QUIET` 表示静默安装。`/ADD_TO_PATH` 显式开启当前用户 `PATH` 更新，`/NO_PATH`（或 `/NO_ADD_TO_PATH`）关闭该更新；重复安装时还会删除此前由本安装器拥有的 PATH 项。`/CONFIGURE_JAVA` 只在确认后生效，并要求 `<数据目录>\current\bin\java.exe` 与 `javac.exe` 均存在；如果已有不同的 `JAVA_HOME`，没有 `/REPLACE_JAVA_HOME` 时会报告冲突并保持原值。`/DISCOVER` 只在安装完成后执行发现，不会自动选择当前 JDK。环境变量更新会广播给已运行的程序，但建议打开新终端后再使用新的 `PATH`。
+`/S`、`/SILENT` 和 `/QUIET` 表示静默安装。`/ADD_TO_PATH` 显式开启 `PATH` 更新。`/USER_PATH` 写入当前用户环境并且是默认值；`/SYSTEM_PATH`（也可用 `/MACHINE_PATH` 或 `/ALL_USERS_PATH`）写入系统环境，需要管理员权限。`/NO_PATH`（或 `/NO_ADD_TO_PATH`）关闭 PATH 更新；重复安装时还会删除此前由本安装器拥有的 PATH 项。`/CONFIGURE_JAVA` 只在确认后生效，并要求 `<数据目录>\current\bin\java.exe` 与 `javac.exe` 均存在；如果已有不同的 `JAVA_HOME`，没有 `/REPLACE_JAVA_HOME` 时会报告冲突并保持原值。`/DISCOVER` 只在安装完成后执行发现，不会自动选择当前 JDK。环境变量更新会广播给已运行的程序，但建议打开新终端后再使用新的 `PATH`。
 
 `/NO_CONFIGURE_JAVA` 会关闭 Java 环境配置；重复安装时，如果这些变量曾由本安装器管理，会恢复原先的 `JAVA_HOME`。
 

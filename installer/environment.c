@@ -16,7 +16,9 @@
 
 #include <windows.h>
 
-#define JVMAN_ENVIRONMENT_KEY L"Environment"
+#define JVMAN_USER_ENVIRONMENT_KEY L"Environment"
+#define JVMAN_MACHINE_ENVIRONMENT_KEY \
+    L"SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment"
 #define JVMAN_INSTALLER_KEY L"Software\\jvman\\Installer"
 #define JVMAN_ARP_KEY L"Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\jvman"
 
@@ -25,7 +27,9 @@
 #define JVMAN_VALUE_INSTALL_ID L"InstallId"
 #define JVMAN_VALUE_DATA_HOME L"DataHome"
 #define JVMAN_VALUE_APP_PATH_OWNED L"AppPathOwned"
+#define JVMAN_VALUE_APP_PATH_SCOPE L"AppPathScope"
 #define JVMAN_VALUE_JAVA_PATH_OWNED L"JavaPathOwned"
+#define JVMAN_VALUE_JAVA_PATH_SCOPE L"JavaPathScope"
 #define JVMAN_VALUE_JAVA_HOME_OWNED L"JavaHomeOwned"
 #define JVMAN_VALUE_JAVA_HOME_PRIOR_PRESENT L"JavaHomePriorPresent"
 #define JVMAN_VALUE_JAVA_HOME_PRIOR_TYPE L"JavaHomePriorType"
@@ -67,10 +71,16 @@ static int valid_environment_type(uint32_t type) {
     return type == (uint32_t)REG_SZ || type == (uint32_t)REG_EXPAND_SZ;
 }
 
+static int valid_environment_scope(uint32_t scope) {
+    return scope == (uint32_t)JVMAN_ENV_SCOPE_USER ||
+           scope == (uint32_t)JVMAN_ENV_SCOPE_MACHINE;
+}
+
 static JvmanEnvironmentStatus map_registry_status(LSTATUS status) {
     if (status == ERROR_SUCCESS) return JVMAN_ENV_OK;
     if (status == ERROR_FILE_NOT_FOUND) return JVMAN_ENV_NOT_FOUND;
     if (status == ERROR_MORE_DATA) return JVMAN_ENV_TOO_LONG;
+    if (status == ERROR_ACCESS_DENIED) return JVMAN_ENV_ACCESS_DENIED;
     return JVMAN_ENV_WIN32_ERROR;
 }
 
@@ -250,18 +260,30 @@ static JvmanEnvironmentStatus query_registry_dword(HKEY key,
     return JVMAN_ENV_OK;
 }
 
-static JvmanEnvironmentStatus open_environment_key(DWORD access, int create,
+static JvmanEnvironmentStatus open_environment_key(JvmanEnvironmentScope scope,
+                                                    DWORD access, int create,
                                                     HKEY *key_out) {
     LSTATUS result;
+    HKEY root;
+    const wchar_t *subkey;
     if (!key_out) return JVMAN_ENV_INVALID_ARGUMENT;
     *key_out = NULL;
+    if (scope == JVMAN_ENV_SCOPE_USER) {
+        root = HKEY_CURRENT_USER;
+        subkey = JVMAN_USER_ENVIRONMENT_KEY;
+    } else if (scope == JVMAN_ENV_SCOPE_MACHINE) {
+        root = HKEY_LOCAL_MACHINE;
+        subkey = JVMAN_MACHINE_ENVIRONMENT_KEY;
+    } else {
+        return JVMAN_ENV_INVALID_ARGUMENT;
+    }
     if (create) {
-        result = RegCreateKeyExW(HKEY_CURRENT_USER, JVMAN_ENVIRONMENT_KEY, 0,
+        result = RegCreateKeyExW(root, subkey, 0,
                                  NULL, REG_OPTION_NON_VOLATILE,
                                  access | KEY_CREATE_SUB_KEY, NULL, key_out,
                                  NULL);
     } else {
-        result = RegOpenKeyExW(HKEY_CURRENT_USER, JVMAN_ENVIRONMENT_KEY, 0,
+        result = RegOpenKeyExW(root, subkey, 0,
                                access, key_out);
     }
     return map_registry_status(result);
@@ -340,12 +362,13 @@ static JvmanEnvironmentStatus delete_registry_value(HKEY key,
 }
 
 static JvmanEnvironmentStatus read_environment_value(
-    const wchar_t *name, JvmanRegistryString *value_out) {
+    JvmanEnvironmentScope scope, const wchar_t *name,
+    JvmanRegistryString *value_out) {
     HKEY key = NULL;
     JvmanEnvironmentStatus status;
     if (!name || !value_out) return JVMAN_ENV_INVALID_ARGUMENT;
     registry_string_init(value_out);
-    status = open_environment_key(KEY_QUERY_VALUE, 0, &key);
+    status = open_environment_key(scope, KEY_QUERY_VALUE, 0, &key);
     if (status == JVMAN_ENV_NOT_FOUND) return JVMAN_ENV_OK;
     if (status != JVMAN_ENV_OK) return status;
     status = query_registry_string(key, name, JVMAN_ENV_VALUE_MAX_CHARS,
@@ -355,11 +378,12 @@ static JvmanEnvironmentStatus read_environment_value(
 }
 
 static JvmanEnvironmentStatus write_environment_value(
-    const wchar_t *name, const wchar_t *value, DWORD type) {
+    JvmanEnvironmentScope scope, const wchar_t *name, const wchar_t *value,
+    DWORD type) {
     HKEY key = NULL;
     JvmanEnvironmentStatus status;
     if (!name || !value) return JVMAN_ENV_INVALID_ARGUMENT;
-    status = open_environment_key(KEY_SET_VALUE, 1, &key);
+    status = open_environment_key(scope, KEY_SET_VALUE, 1, &key);
     if (status != JVMAN_ENV_OK) return status;
     status = write_registry_string(key, name, value, type,
                                    JVMAN_ENV_VALUE_MAX_CHARS);
@@ -367,11 +391,12 @@ static JvmanEnvironmentStatus write_environment_value(
     return status;
 }
 
-static JvmanEnvironmentStatus delete_environment_value(const wchar_t *name) {
+static JvmanEnvironmentStatus delete_environment_value(JvmanEnvironmentScope scope,
+                                                       const wchar_t *name) {
     HKEY key = NULL;
     JvmanEnvironmentStatus status;
     if (!name) return JVMAN_ENV_INVALID_ARGUMENT;
-    status = open_environment_key(KEY_SET_VALUE, 0, &key);
+    status = open_environment_key(scope, KEY_SET_VALUE, 0, &key);
     if (status == JVMAN_ENV_NOT_FOUND) return JVMAN_ENV_OK;
     if (status != JVMAN_ENV_OK) return status;
     status = delete_registry_value(key, name);
@@ -415,6 +440,10 @@ static JvmanEnvironmentStatus metadata_validate(
         (metadata->java_home_owned != 0 && metadata->java_home_owned != 1) ||
         (metadata->java_home_prior_present != 0 &&
          metadata->java_home_prior_present != 1)) {
+        return JVMAN_ENV_METADATA_INVALID;
+    }
+    if (!valid_environment_scope(metadata->app_path_scope) ||
+        !valid_environment_scope(metadata->java_path_scope)) {
         return JVMAN_ENV_METADATA_INVALID;
     }
     if (metadata->java_home_prior_present &&
@@ -484,6 +513,8 @@ const wchar_t *jvman_environment_status_message(JvmanEnvironmentStatus status) {
         case JVMAN_ENV_TOO_LONG: return L"registry value is too long";
         case JVMAN_ENV_NO_MEMORY: return L"out of memory";
         case JVMAN_ENV_WIN32_ERROR: return L"Windows registry operation failed";
+        case JVMAN_ENV_ACCESS_DENIED:
+            return L"administrator permission is required for the selected environment change";
         case JVMAN_ENV_METADATA_INVALID: return L"installer metadata is malformed";
         case JVMAN_ENV_CONFLICT: return L"JAVA_HOME was changed by the user";
         case JVMAN_ENV_UNSUPPORTED: return L"installer environment backend is unsupported";
@@ -555,11 +586,27 @@ JvmanEnvironmentStatus jvman_installer_metadata_load(
         }
     }
     if (status == JVMAN_ENV_OK) {
+        status = query_registry_dword(key, JVMAN_VALUE_APP_PATH_SCOPE, 0,
+                                      &value, &present);
+        if (status == JVMAN_ENV_OK && present) {
+            if (!valid_environment_scope(value)) status = JVMAN_ENV_METADATA_INVALID;
+            else loaded.app_path_scope = value;
+        }
+    }
+    if (status == JVMAN_ENV_OK) {
         status = query_registry_dword(key, JVMAN_VALUE_JAVA_PATH_OWNED, 1,
                                       &value, &present);
         if (status == JVMAN_ENV_OK) {
             if (value > 1u) status = JVMAN_ENV_METADATA_INVALID;
             else loaded.java_path_owned = (int)value;
+        }
+    }
+    if (status == JVMAN_ENV_OK) {
+        status = query_registry_dword(key, JVMAN_VALUE_JAVA_PATH_SCOPE, 0,
+                                      &value, &present);
+        if (status == JVMAN_ENV_OK && present) {
+            if (!valid_environment_scope(value)) status = JVMAN_ENV_METADATA_INVALID;
+            else loaded.java_path_scope = value;
         }
     }
     if (status == JVMAN_ENV_OK) {
@@ -652,8 +699,16 @@ JvmanEnvironmentStatus jvman_installer_metadata_save(
                                       (uint32_t)metadata->app_path_owned);
     }
     if (status == JVMAN_ENV_OK) {
+        status = write_registry_dword(key, JVMAN_VALUE_APP_PATH_SCOPE,
+                                      metadata->app_path_scope);
+    }
+    if (status == JVMAN_ENV_OK) {
         status = write_registry_dword(key, JVMAN_VALUE_JAVA_PATH_OWNED,
                                       (uint32_t)metadata->java_path_owned);
+    }
+    if (status == JVMAN_ENV_OK) {
+        status = write_registry_dword(key, JVMAN_VALUE_JAVA_PATH_SCOPE,
+                                      metadata->java_path_scope);
     }
     if (status == JVMAN_ENV_OK) {
         status = write_registry_dword(key, JVMAN_VALUE_JAVA_HOME_OWNED,
@@ -703,21 +758,23 @@ JvmanEnvironmentStatus jvman_installer_metadata_delete(void) {
 }
 
 JvmanEnvironmentStatus jvman_environment_add_path(
-    const wchar_t *directory, int prior_owned, int *owned_out, int *changed_out) {
+    JvmanEnvironmentScope scope, const wchar_t *directory, int prior_owned,
+    int *owned_out, int *changed_out) {
     JvmanRegistryString current;
     wchar_t *updated = NULL;
     JvmanPathListStatus path_status;
     JvmanEnvironmentStatus status;
     int changed = 0;
     DWORD type;
-    if (!directory || !owned_out || !changed_out ||
+    if (!valid_environment_scope((uint32_t)scope) || !directory ||
+        !owned_out || !changed_out ||
         (prior_owned != 0 && prior_owned != 1)) {
         return JVMAN_ENV_INVALID_ARGUMENT;
     }
     *owned_out = prior_owned;
     *changed_out = 0;
     registry_string_init(&current);
-    status = read_environment_value(L"Path", &current);
+    status = read_environment_value(scope, L"Path", &current);
     if (status != JVMAN_ENV_OK) return status;
     path_status = jvman_pathlist_add(
         current.present ? current.value : L"", directory, &updated, &changed);
@@ -734,7 +791,7 @@ JvmanEnvironmentStatus jvman_environment_add_path(
         return JVMAN_ENV_OK;
     }
     type = current.present ? current.type : REG_EXPAND_SZ;
-    status = write_environment_value(L"Path", updated, type);
+    status = write_environment_value(scope, L"Path", updated, type);
     free(updated);
     registry_string_free(&current);
     if (status != JVMAN_ENV_OK) return status;
@@ -745,19 +802,21 @@ JvmanEnvironmentStatus jvman_environment_add_path(
 }
 
 JvmanEnvironmentStatus jvman_environment_remove_path(
-    const wchar_t *directory, int owned, int *changed_out) {
+    JvmanEnvironmentScope scope, const wchar_t *directory, int owned,
+    int *changed_out) {
     JvmanRegistryString current;
     wchar_t *updated = NULL;
     JvmanPathListStatus path_status;
     JvmanEnvironmentStatus status;
     int changed = 0;
-    if (!directory || !changed_out || (owned != 0 && owned != 1)) {
+    if (!valid_environment_scope((uint32_t)scope) || !directory ||
+        !changed_out || (owned != 0 && owned != 1)) {
         return JVMAN_ENV_INVALID_ARGUMENT;
     }
     *changed_out = 0;
     if (!owned) return JVMAN_ENV_OK;
     registry_string_init(&current);
-    status = read_environment_value(L"Path", &current);
+    status = read_environment_value(scope, L"Path", &current);
     if (status != JVMAN_ENV_OK) return status;
     if (!current.present) {
         registry_string_free(&current);
@@ -776,8 +835,8 @@ JvmanEnvironmentStatus jvman_environment_remove_path(
         free(updated);
         return JVMAN_ENV_OK;
     }
-    if (updated[0] == L'\0') status = delete_environment_value(L"Path");
-    else status = write_environment_value(L"Path", updated, current.type);
+    if (updated[0] == L'\0') status = delete_environment_value(scope, L"Path");
+    else status = write_environment_value(scope, L"Path", updated, current.type);
     free(updated);
     registry_string_free(&current);
     if (status != JVMAN_ENV_OK) return status;
@@ -813,7 +872,7 @@ JvmanEnvironmentStatus jvman_environment_configure_java_home(
     }
     first_configuration = !metadata->java_home_owned;
     registry_string_init(&current);
-    status = read_environment_value(L"JAVA_HOME", &current);
+    status = read_environment_value(JVMAN_ENV_SCOPE_USER, L"JAVA_HOME", &current);
     if (status != JVMAN_ENV_OK) return status;
     if (current.present && wcscmp(current.value, java_home) != 0 &&
         !replace_existing) {
@@ -847,7 +906,8 @@ JvmanEnvironmentStatus jvman_environment_configure_java_home(
     }
     type = current.present ? current.type : REG_EXPAND_SZ;
     if (!current.present || wcscmp(current.value, java_home) != 0) {
-        status = write_environment_value(L"JAVA_HOME", java_home, type);
+        status = write_environment_value(JVMAN_ENV_SCOPE_USER, L"JAVA_HOME",
+                                         java_home, type);
         if (status == JVMAN_ENV_OK) changed = 1;
     }
     registry_string_free(&current);
@@ -890,7 +950,7 @@ JvmanEnvironmentStatus jvman_environment_restore_java_home(
         return JVMAN_ENV_METADATA_INVALID;
     }
     registry_string_init(&current);
-    status = read_environment_value(L"JAVA_HOME", &current);
+    status = read_environment_value(JVMAN_ENV_SCOPE_USER, L"JAVA_HOME", &current);
     if (status != JVMAN_ENV_OK) return status;
     if (!current.present || wcscmp(current.value,
                                    metadata->java_home_managed_value) != 0) {
@@ -899,10 +959,10 @@ JvmanEnvironmentStatus jvman_environment_restore_java_home(
     }
     if (metadata->java_home_prior_present) {
         status = write_environment_value(
-            L"JAVA_HOME", metadata->java_home_prior_value,
+            JVMAN_ENV_SCOPE_USER, L"JAVA_HOME", metadata->java_home_prior_value,
             (DWORD)metadata->java_home_prior_type);
     } else {
-        status = delete_environment_value(L"JAVA_HOME");
+        status = delete_environment_value(JVMAN_ENV_SCOPE_USER, L"JAVA_HOME");
     }
     registry_string_free(&current);
     if (status != JVMAN_ENV_OK) return status;
@@ -994,16 +1054,20 @@ JvmanEnvironmentStatus jvman_installer_metadata_delete(void) {
 }
 
 JvmanEnvironmentStatus jvman_environment_add_path(
-    const wchar_t *directory, int prior_owned, int *owned_out, int *changed_out) {
+    JvmanEnvironmentScope scope, const wchar_t *directory, int prior_owned,
+    int *owned_out, int *changed_out) {
     if (!directory || !owned_out || !changed_out) return JVMAN_ENV_INVALID_ARGUMENT;
+    (void)scope;
     *owned_out = prior_owned;
     *changed_out = 0;
     return JVMAN_ENV_UNSUPPORTED;
 }
 
 JvmanEnvironmentStatus jvman_environment_remove_path(
-    const wchar_t *directory, int owned, int *changed_out) {
+    JvmanEnvironmentScope scope, const wchar_t *directory, int owned,
+    int *changed_out) {
     if (!directory || !changed_out) return JVMAN_ENV_INVALID_ARGUMENT;
+    (void)scope;
     *changed_out = 0;
     (void)owned;
     return JVMAN_ENV_UNSUPPORTED;
