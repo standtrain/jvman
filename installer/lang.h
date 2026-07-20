@@ -67,8 +67,8 @@ typedef enum JvmanStringId {
     JVMAN_STR_COUNT
 } JvmanStringId;
 
-/* 弹出语言选择对话框，返回用户选择的语言 */
-JvmanInstallerLang jvman_lang_select_dialog(void);
+/* Show the language dialog: 0 accepted, 1 canceled, -1 on dialog failure. */
+int jvman_lang_select_dialog(void);
 
 /* 根据 Windows UI 语言设置弹窗前的默认语言 */
 void jvman_lang_use_system_default(void);

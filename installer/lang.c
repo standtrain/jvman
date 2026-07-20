@@ -327,13 +327,14 @@ static INT_PTR CALLBACK jvman_lang_dialog_proc(
     return FALSE;
 }
 
-JvmanInstallerLang jvman_lang_select_dialog(void) {
+int jvman_lang_select_dialog(void) {
     JvmanInstallerLang original = active_lang;
     INT_PTR result = DialogBoxParamW(
         GetModuleHandleW(NULL), MAKEINTRESOURCEW(IDD_JVMAN_LANGUAGE), NULL,
         jvman_lang_dialog_proc, (LPARAM)original);
-    if (result != IDOK) active_lang = original;
-    return active_lang;
+    if (result == IDOK) return 0;
+    active_lang = original;
+    return result == IDCANCEL ? 1 : -1;
 }
 
 void jvman_lang_use_system_default(void) {

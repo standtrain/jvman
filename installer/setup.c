@@ -1341,6 +1341,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous,
     InstallerOptions options;
     HANDLE instance_mutex;
     int already_running;
+    int language_result;
     int parse_result;
     int result;
     HRESULT com_status;
@@ -1365,7 +1366,14 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous,
     }
     parse_result = installer_parse_options(argc, argv, &options);
     if (parse_result == 1) {
-        if (!options.silent) (void)jvman_lang_select_dialog();
+        if (!options.silent) {
+            language_result = jvman_lang_select_dialog();
+            if (language_result != 0) {
+                LocalFree(argv);
+                if (com_initialized) CoUninitialize();
+                return language_result > 0 ? 0 : 1;
+            }
+        }
         installer_show_usage();
         LocalFree(argv);
         if (com_initialized) CoUninitialize();
@@ -1398,7 +1406,16 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous,
         if (com_initialized) CoUninitialize();
         return already_running ? INSTALLER_ALREADY_RUNNING_EXIT : 2;
     }
-    if (!options.silent) (void)jvman_lang_select_dialog();
+    if (!options.silent) {
+        language_result = jvman_lang_select_dialog();
+        if (language_result != 0) {
+            ReleaseMutex(instance_mutex);
+            CloseHandle(instance_mutex);
+            LocalFree(argv);
+            if (com_initialized) CoUninitialize();
+            return language_result > 0 ? 0 : 1;
+        }
+    }
     if (!options.silent && !options.uninstall && !options.portable) {
         parse_result = installer_prepare_gui_options(&options);
         if (parse_result != 0) {
