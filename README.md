@@ -1,0 +1,285 @@
+# jvman
+
+[简体中文](README.zh-CN.md)
+
+`jvman` is a small Java version manager written in C11. It manages downloaded
+JDKs and existing local JDK installations with one native executable and no
+linked third-party runtime libraries.
+
+This documentation describes jvman `0.2.0`.
+
+The first release targets Windows while keeping the core portable to Linux and
+macOS. On Windows, switching uses an NTFS directory junction, so it normally
+does not require administrator privileges or Developer Mode.
+
+After building, place `jvman.exe` in a user-writable directory on `PATH`, or
+run it as `.\jvman.exe`. The `jvman` CLI does not edit the registry, the system
+`PATH`, or shell profile files automatically. On Windows, the optional
+`jvman-setup.exe` bundle below can configure the current user's environment after
+an explicit choice.
+
+## Features
+
+- Download Temurin JDKs by Java major version from the Adoptium API.
+- Verify remote archives with the SHA-256 published in Adoptium metadata.
+- Install from a local archive for offline use.
+- Register an existing JDK without copying it.
+- Discover installed Java runtimes and optionally batch-register valid JDKs.
+- Switch through one stable `current` path.
+- Run a command with a selected JDK without changing global state.
+- Diagnose `JAVA_HOME`, `PATH`, downloader, and extractor configuration.
+
+## Build
+
+With GCC or Clang:
+
+```text
+make
+make test
+make integration-test
+make installer-test       # Windows setup end-to-end test
+```
+
+With CMake:
+
+```text
+cmake -S . -B build
+cmake --build build
+ctest --test-dir build
+```
+
+On this Windows machine the available toolchain is MSYS2 UCRT64, so the exact
+build command is:
+
+```powershell
+$env:Path = 'C:\msys64\ucrt64\bin;' + $env:Path
+mingw32-make.exe
+```
+
+On Windows, `mingw32-make.exe` builds `jvman.exe` and the self-contained
+`jvman-setup.exe` bundle. The CMake Windows build produces the same bundle in
+the selected build directory. A cross-compiled Windows build can still build
+the setup stub and packer, but skips the final bundle because the host cannot
+execute the packer. With Make, the finished artifact is `.\jvman-setup.exe`;
+with CMake it is `<build>\jvman-setup.exe`.
+
+## Windows Installer
+
+`jvman-setup.exe` is a per-user native Win32 installer. It does not request
+administrator privileges or write machine-wide settings. The default locations
+are:
+
+| Item | Default |
+| --- | --- |
+| Program files | `%LOCALAPPDATA%\Programs\jvman` |
+| jvman data | `%LOCALAPPDATA%\jvman` (or a valid `JVMAN_HOME`) |
+| Registry state | `HKCU\Software\jvman\Installer` |
+
+When started without switches, the installer asks whether to add the program
+directory to the current-user `PATH`, whether a valid `current` JDK should
+provide `JAVA_HOME` and `current\bin`, and whether to run
+`jvman discover --register`. Existing `PATH` entries are retained and exact
+or canonical duplicates are not added. The installer never changes the
+system `PATH`.
+
+The normal command-line switches are:
+
+```text
+jvman-setup.exe /S [/DIR=<absolute-directory>] [/NO_PATH]
+jvman-setup.exe /CONFIGURE_JAVA [/REPLACE_JAVA_HOME]
+jvman-setup.exe /DISCOVER
+jvman-setup.exe /PORTABLE /DIR=<absolute-directory>
+jvman-setup.exe /UNINSTALL [/S]
+jvman-setup.exe /HELP
+```
+
+`/S`, `/SILENT`, and `/QUIET` suppress dialogs. `/ADD_TO_PATH` explicitly
+enables the user `PATH` update; `/NO_PATH` (or `/NO_ADD_TO_PATH`) disables it
+and removes a PATH entry previously owned by this installer on upgrade.
+`/CONFIGURE_JAVA` is opt-in and requires `<data-home>\current\bin\java.exe`
+and `javac.exe`; without
+`/REPLACE_JAVA_HOME`, a different existing `JAVA_HOME` is treated as a conflict
+and is left unchanged. `/DISCOVER` runs discovery only after installation and
+does not select a current JDK. Use a new terminal after an environment update
+so that it receives the broadcast change.
+
+`/NO_CONFIGURE_JAVA` disables Java environment configuration; on a repeat
+install it restores any `JAVA_HOME` value previously managed by this installer.
+
+For unattended provisioning, combine the desired switches with `/S`; a
+non-silent run presents the same choices in the graphical prompts.
+
+`/PORTABLE /DIR=...` extracts only `jvman.exe` to the explicitly supplied
+directory. It does not create `JVMAN_HOME`, write the registry, or modify
+`PATH`/`JAVA_HOME`, and is suitable for a USB or per-project copy. The regular
+uninstaller is available from Add/Remove Programs or `/UNINSTALL`; it removes
+only files and environment entries owned by this installation. Registered JDKs,
+`JVMAN_HOME`, `jdks`, `cache`, `versions`, and `current` data are preserved.
+
+## Quick Start
+
+```powershell
+# Download the latest Temurin build for a Java major version.
+jvman install 21
+
+# Or register a JDK that already exists.
+jvman add oracle-23 'C:\Program Files\Java\jdk-23'
+
+# Preview installed Java runtimes, then register new JDKs if desired.
+jvman discover
+jvman discover --register
+
+jvman list
+jvman use 21
+
+# Apply the stable JAVA_HOME/PATH to this PowerShell session.
+jvman init powershell | Invoke-Expression
+
+java -version
+jvman current
+```
+
+Add the following line to the PowerShell profile once if every new shell should
+use the selected JDK:
+
+```powershell
+jvman init powershell | Invoke-Expression
+```
+
+`JAVA_HOME` points to `<data-home>\current`, not a version-specific directory.
+After this one-time shell initialization, `jvman use <name>` redirects the
+junction and the next Java process sees the new JDK immediately.
+
+## Commands
+
+```text
+jvman install <major> [--name <name>] [--sha256 <hex>]
+jvman install <name> --archive <file> [--sha256 <hex>]
+jvman add <name> <jdk-home>
+jvman discover [--register]
+jvman use <name>
+jvman list
+jvman current
+jvman which [name]
+jvman remove <name>
+jvman exec <name> [--] <command> [args...]
+jvman init [powershell|cmd|sh]
+jvman doctor
+jvman home
+```
+
+Aliases: `ls` for `list`, `default` for `use`, and `uninstall` for `remove`.
+
+Examples:
+
+```powershell
+jvman exec 17 -- java -version
+jvman exec 8 -- mvn test
+jvman install company-jdk --archive .\jdk.zip --sha256 <64-hex-digits>
+```
+
+## Discovering Installed Java
+
+`jvman discover` is a read-only preview. It does not create `JVMAN_HOME`, write
+registrations, change `current`, or run any discovered Java executable. Its
+output has these columns:
+
+| Column | Meaning |
+| --- | --- |
+| `TYPE` | Detected runtime type: `JDK`, `JRE`, or `INVALID`. |
+| `VERSION` | `JAVA_VERSION` from the installation's `release` file. |
+| `VENDOR` | Normalized vendor slug, such as `temurin`, `corretto`, or `oracle`. |
+| `NAME` | Existing registration name or the proposed `<vendor>-<version>` name. |
+| `STATUS` | Whether the installation is new, registered, a JRE, or invalid. |
+| `SOURCES` | All discovery sources that resolved to this same Java home. |
+| `JAVA_HOME` | Canonical installation path. |
+
+The status values are `new` for a registerable unregistered JDK,
+`registered:<name>` for a home already registered under that name, `jre` for a
+runtime that is not a complete JDK, and `invalid` for a candidate that cannot
+be registered safely.
+
+Discovery checks `JAVA_HOME` and every `PATH` entry, resolving quotes,
+environment variables, links, and Windows Java shims to their real targets.
+It also checks the following bounded locations:
+
+- Windows JavaSoft JDK/JRE keys in HKLM and HKCU, in both 32-bit and 64-bit
+  registry views, plus known vendor directories under Program Files,
+  Program Files (x86), and LocalAppData Programs.
+- User-managed roots such as `~/.jdks`, SDKMAN, and Jabba.
+- Linux roots including `/usr/java` and `/usr/lib*/jvm`.
+- macOS `JavaVirtualMachines` and fixed Homebrew roots.
+
+Only those fixed roots and their necessary one or two child levels are
+enumerated; jvman never scans an entire disk. Canonical paths are deduplicated,
+and multiple origins are merged in `SOURCES`.
+
+`jvman discover --register` revalidates candidates and registers only `new`
+JDKs. A registerable JDK must contain `java`, `javac`, and a valid `release`
+file no larger than 64 KiB, and its Java version must be 8 or newer. JREs
+remain visible but are never registered. Name
+conflicts receive stable `-2`, `-3`, and later suffixes; existing configuration
+is never overwritten, repeated runs are idempotent, and registration does not
+select a current version. Paths under `JVMAN_HOME/current` or `JVMAN_HOME/jdks`
+only match existing registrations and do not create new external aliases.
+
+All discovered registrations use external semantics: `jvman remove` removes
+the registration record but never deletes the original JDK installation.
+
+## Data Layout
+
+The default data directory is `%LOCALAPPDATA%\jvman` on Windows and
+`${XDG_DATA_HOME:-~/.local/share}/jvman` on Unix. Set `JVMAN_HOME` to override
+it.
+
+```text
+jvman/
+  cache/             temporary downloads and provider metadata
+  jdks/              JDKs owned by jvman
+  staging/           incomplete installs, never activated
+  versions/*.conf    registered name -> JAVA_HOME records
+  current            junction/symlink to the selected JDK
+  current.version    selected registration name
+  state.lock         cross-process mutation lock
+```
+
+Removing an external registration never deletes its JDK. Removing a managed
+installation only deletes the exact `jdks/<name>` directory, and the active JDK
+cannot be removed.
+
+## Design References
+
+The command model and layout draw on these established projects:
+
+- [SDKMAN](https://sdkman.io/usage/) for `install`, `use`, `current`, and the
+  stable candidate layout.
+- [jEnv](https://github.com/jenv/jenv) for registering existing JDKs, `which`,
+  and `doctor`.
+- [Jabba](https://github.com/Jabba-Team/jabba) for a small cross-platform Java
+  manager and shell-generated environment changes.
+- [HMCL](https://github.com/HMCL-dev/HMCL) for bounded vendor-directory and
+  JavaSoft registry discovery concepts.
+- [nvm-windows](https://github.com/coreybutler/nvm-windows) for switching a
+  stable path instead of repeatedly rewriting `PATH`.
+
+No source code is copied from those projects.
+
+## Current Scope
+
+Version `0.2.0` uses Temurin as its only remote-install provider and accepts a
+Java major version for remote installs. Local discovery recognizes common JDK
+vendors, but multi-vendor download catalogs, managed JREs, EA builds, semantic
+version ranges, project `.java-version` files, self-update, and machine-wide
+environment changes are intentionally deferred.
+
+The native Windows build targets Windows 10 version 1903 or later. Its embedded
+UTF-8 code-page manifest allows non-ASCII data and JDK paths without requiring
+wide-character command-line wrappers.
+
+Remote archives are accepted only after matching the SHA-256 returned by the
+Adoptium API. This detects corruption and unexpected content from a mismatched
+download; it is not a replacement for independent signature verification.
+
+Archive extraction uses the operating system's `tar` implementation. The URL
+comes from the built-in Adoptium provider and is checksum-verified. Local
+archives are trusted input unless `--sha256` is supplied.

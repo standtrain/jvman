@@ -1,0 +1,1242 @@
+#include "manager.h"
+
+#include "discovery.h"
+#include "platform.h"
+#include "sha256.h"
+#include "util.h"
+
+#include <ctype.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+static int print_error(const char *message) {
+    fprintf(stderr, "jvman: %s\n", message);
+    return 1;
+}
+
+static int print_platform_error(const char *message) {
+    fprintf(stderr, "jvman: %s: %s\n", message, platform_last_error());
+    return 1;
+}
+
+int jvman_context_init(JvmanContext *context) {
+    char raw_root[JVMAN_PATH_MAX];
+    if (!context || platform_default_root(raw_root, sizeof(raw_root)) != 0 ||
+        platform_absolute_path(raw_root, context->root, sizeof(context->root)) != 0) {
+        return -1;
+    }
+    if (jvman_path_join(context->versions, sizeof(context->versions), context->root,
+                        "versions") != 0 ||
+        jvman_path_join(context->jdks, sizeof(context->jdks), context->root,
+                        "jdks") != 0 ||
+        jvman_path_join(context->cache, sizeof(context->cache), context->root,
+                        "cache") != 0 ||
+        jvman_path_join(context->staging, sizeof(context->staging), context->root,
+                        "staging") != 0 ||
+        jvman_path_join(context->current_link, sizeof(context->current_link), context->root,
+                        "current") != 0 ||
+        jvman_path_join(context->current_state, sizeof(context->current_state), context->root,
+                        "current.version") != 0 ||
+        jvman_path_join(context->lock_file, sizeof(context->lock_file), context->root,
+                        "state.lock") != 0) {
+        return -1;
+    }
+    return 0;
+}
+
+static int prepare_layout(const JvmanContext *context) {
+    if (platform_mkdirs(context->root) != 0 ||
+        platform_mkdirs(context->versions) != 0 ||
+        platform_mkdirs(context->jdks) != 0 ||
+        platform_mkdirs(context->cache) != 0 ||
+        platform_mkdirs(context->staging) != 0) {
+        return -1;
+    }
+    return 0;
+}
+
+static int registration_path(const JvmanContext *context, const char *name,
+                             char *out, size_t out_size) {
+    char filename[JVMAN_NAME_MAX + 16];
+    if (!jvman_valid_name(name) ||
+        snprintf(filename, sizeof(filename), "%s.conf", name) >= (int)sizeof(filename)) {
+        return -1;
+    }
+    return jvman_path_join(out, out_size, context->versions, filename);
+}
+
+static int read_registration(const JvmanContext *context, const char *name,
+                             JvmanRegistration *registration) {
+    char path[JVMAN_PATH_MAX];
+    FILE *file;
+    char line[JVMAN_LINE_MAX];
+    int found_home = 0;
+    int found_managed = 0;
+    if (!registration || registration_path(context, name, path, sizeof(path)) != 0) {
+        return -1;
+    }
+    file = fopen(path, "rb");
+    if (!file) return -1;
+    memset(registration, 0, sizeof(*registration));
+    strcpy(registration->name, name);
+    while (fgets(line, sizeof(line), file)) {
+        size_t length = strlen(line);
+        while (length && (line[length - 1] == '\r' || line[length - 1] == '\n')) {
+            line[--length] = '\0';
+        }
+        if (strncmp(line, "managed=", 8) == 0) {
+            if (strcmp(line + 8, "0") != 0 && strcmp(line + 8, "1") != 0) {
+                fclose(file); return -1;
+            }
+            registration->managed = line[8] == '1';
+            found_managed = 1;
+        } else if (strncmp(line, "home=", 5) == 0) {
+            if (strlen(line + 5) >= sizeof(registration->home)) {
+                fclose(file); return -1;
+            }
+            strcpy(registration->home, line + 5);
+            found_home = 1;
+        }
+    }
+    fclose(file);
+    return found_home && found_managed ? 0 : -1;
+}
+
+static int write_registration(const JvmanContext *context,
+                              const JvmanRegistration *registration) {
+    char path[JVMAN_PATH_MAX];
+    char content[JVMAN_PATH_MAX + 64];
+    if (registration_path(context, registration->name, path, sizeof(path)) != 0 ||
+        strchr(registration->home, '\n') || strchr(registration->home, '\r') ||
+        snprintf(content, sizeof(content), "managed=%d\nhome=%s\n",
+                 registration->managed ? 1 : 0, registration->home) >= (int)sizeof(content)) {
+        return -1;
+    }
+    return platform_write_text_atomic(path, content);
+}
+
+static int registration_exists(const JvmanContext *context, const char *name) {
+    char path[JVMAN_PATH_MAX];
+    return registration_path(context, name, path, sizeof(path)) == 0 &&
+           platform_is_file(path);
+}
+
+static int current_name(const JvmanContext *context, char *out, size_t out_size) {
+    if (platform_read_line(context->current_state, out, out_size) != 0 ||
+        !jvman_valid_name(out)) {
+        if (out_size) out[0] = '\0';
+        return -1;
+    }
+    return 0;
+}
+
+static int find_jdk_home(const char *input, char *out, size_t out_size) {
+    return jvman_discovery_find_jdk_home(input, out, out_size);
+}
+
+static int acquire_lock(const JvmanContext *context, PlatformLock *lock) {
+    if (prepare_layout(context) != 0) return -1;
+    return platform_lock_acquire(context->lock_file, lock);
+}
+
+static int command_add(const JvmanContext *context, const char *name, const char *path) {
+    JvmanRegistration registration;
+    PlatformLock lock;
+    int result = 1;
+    if (!jvman_valid_name(name)) return print_error("invalid version name");
+    if (find_jdk_home(path, registration.home, sizeof(registration.home)) != 0) {
+        return print_error("the path is not a JDK home (bin/java and bin/javac are required)");
+    }
+    if (jvman_path_equal(registration.home, context->current_link) ||
+        jvman_path_is_within(context->current_link, registration.home)) {
+        return print_error("a JDK registration cannot point to jvman's current link");
+    }
+    strcpy(registration.name, name);
+    registration.managed = 0;
+    if (acquire_lock(context, &lock) != 0) return print_platform_error("cannot lock state");
+    if (registration_exists(context, name)) {
+        print_error("that version name is already registered");
+        goto done;
+    }
+    if (write_registration(context, &registration) != 0) {
+        print_platform_error("cannot save registration");
+        goto done;
+    }
+    printf("Registered %s -> %s\n", name, registration.home);
+    result = 0;
+done:
+    platform_lock_release(&lock);
+    return result;
+}
+
+static int switch_to_registration(const JvmanContext *context,
+                                  const JvmanRegistration *registration) {
+    char state[JVMAN_NAME_MAX + 4];
+    char previous[JVMAN_NAME_MAX + 1] = {0};
+    int had_previous = current_name(context, previous, sizeof(previous)) == 0;
+    if (!platform_is_directory(registration->home)) {
+        return print_error("registered JDK home no longer exists");
+    }
+    if (snprintf(state, sizeof(state), "%s\n", registration->name) >= (int)sizeof(state) ||
+        platform_write_text_atomic(context->current_state, state) != 0) {
+        return print_platform_error("cannot record the selected JDK");
+    }
+    if (platform_replace_directory_link(context->current_link, registration->home) != 0) {
+        char switch_error[512];
+        snprintf(switch_error, sizeof(switch_error), "%s", platform_last_error());
+        if (had_previous) {
+            snprintf(state, sizeof(state), "%s\n", previous);
+            if (platform_write_text_atomic(context->current_state, state) != 0) {
+                fprintf(stderr, "jvman: cannot switch current JDK: %s; state rollback also failed\n",
+                        switch_error);
+                return 1;
+            }
+        } else if (platform_remove_file(context->current_state) != 0) {
+            fprintf(stderr, "jvman: cannot switch current JDK: %s; state rollback also failed\n",
+                    switch_error);
+            return 1;
+        }
+        fprintf(stderr, "jvman: cannot switch current JDK: %s\n", switch_error);
+        return 1;
+    }
+    return 0;
+}
+
+static int command_use(const JvmanContext *context, const char *name) {
+    JvmanRegistration registration;
+    PlatformLock lock;
+    int result = 1;
+    if (!jvman_valid_name(name)) return print_error("unknown JDK version");
+    if (acquire_lock(context, &lock) != 0) return print_platform_error("cannot lock state");
+    if (read_registration(context, name, &registration) != 0) {
+        print_error("unknown JDK version");
+        goto done;
+    }
+    if (find_jdk_home(registration.home, registration.home, sizeof(registration.home)) != 0) {
+        print_error("registered path is not a valid JDK anymore");
+        goto done;
+    }
+    if (jvman_path_equal(registration.home, context->current_link) ||
+        jvman_path_is_within(context->current_link, registration.home)) {
+        print_error("registered JDK resolves through jvman's current link");
+        goto done;
+    }
+    result = switch_to_registration(context, &registration);
+done:
+    platform_lock_release(&lock);
+    if (result == 0) {
+        printf("Now using %s (%s)\n", registration.name, registration.home);
+    }
+    return result;
+}
+
+static int name_compare(const void *left, const void *right) {
+    const char *const *a = (const char *const *)left;
+    const char *const *b = (const char *const *)right;
+    return strcmp(*a, *b);
+}
+
+static int command_list(const JvmanContext *context) {
+    char **entries = NULL;
+    size_t count = 0;
+    size_t i;
+    size_t shown = 0;
+    char active[JVMAN_NAME_MAX + 1] = {0};
+    if (prepare_layout(context) != 0) return print_platform_error("cannot prepare data directory");
+    current_name(context, active, sizeof(active));
+    if (platform_list_directory(context->versions, &entries, &count) != 0) {
+        return print_platform_error("cannot list registrations");
+    }
+    qsort(entries, count, sizeof(*entries), name_compare);
+    printf("  %-20s %-9s %s\n", "VERSION", "SOURCE", "JAVA_HOME");
+    for (i = 0; i < count; ++i) {
+        JvmanRegistration registration;
+        size_t length;
+        if (!jvman_ends_with(entries[i], ".conf")) continue;
+        length = strlen(entries[i]) - 5;
+        if (length == 0 || length > JVMAN_NAME_MAX) continue;
+        entries[i][length] = '\0';
+        if (read_registration(context, entries[i], &registration) != 0) continue;
+        printf("%c %-20s %-9s %s%s\n",
+               jvman_name_equal(active, registration.name) ? '*' : ' ',
+               registration.name,
+               registration.managed ? "managed" : "external",
+               registration.home,
+               platform_is_directory(registration.home) ? "" : " [missing]");
+        ++shown;
+    }
+    platform_free_directory_list(entries, count);
+    if (!shown) printf("  (no JDKs registered)\n");
+    return 0;
+}
+
+typedef struct JvmanRegistrationList {
+    JvmanRegistration *items;
+    size_t count;
+    size_t capacity;
+} JvmanRegistrationList;
+
+typedef struct JvmanDiscoveryView {
+    char name[JVMAN_NAME_MAX + 1];
+    char status[JVMAN_NAME_MAX + 32];
+    int reserves_name;
+} JvmanDiscoveryView;
+
+static void registration_list_free(JvmanRegistrationList *list) {
+    if (!list) return;
+    free(list->items);
+    memset(list, 0, sizeof(*list));
+}
+
+static int registration_list_reserve(JvmanRegistrationList *list, size_t needed) {
+    JvmanRegistration *grown;
+    size_t capacity;
+    if (needed <= list->capacity) return 0;
+    capacity = list->capacity ? list->capacity * 2 : 16;
+    while (capacity < needed) {
+        if (capacity > (size_t)-1 / 2) return -1;
+        capacity *= 2;
+    }
+    grown = (JvmanRegistration *)realloc(list->items, capacity * sizeof(*grown));
+    if (!grown) return -1;
+    list->items = grown;
+    list->capacity = capacity;
+    return 0;
+}
+
+static int registration_list_append(JvmanRegistrationList *list,
+                                    const JvmanRegistration *registration) {
+    if (registration_list_reserve(list, list->count + 1) != 0) return -1;
+    list->items[list->count++] = *registration;
+    return 0;
+}
+
+static int load_registrations(const JvmanContext *context,
+                              JvmanRegistrationList *list) {
+    char **entries = NULL;
+    size_t count = 0;
+    size_t i;
+    memset(list, 0, sizeof(*list));
+    if (!platform_path_exists(context->versions)) return 0;
+    if (platform_list_directory(context->versions, &entries, &count) != 0) return -1;
+    if (count > 1) qsort(entries, count, sizeof(*entries), name_compare);
+    for (i = 0; i < count; ++i) {
+        size_t length;
+        JvmanRegistration registration;
+        if (!jvman_ends_with(entries[i], ".conf")) continue;
+        length = strlen(entries[i]) - 5;
+        if (length == 0 || length > JVMAN_NAME_MAX) continue;
+        entries[i][length] = '\0';
+        if (read_registration(context, entries[i], &registration) == 0 &&
+            registration_list_append(list, &registration) != 0) {
+            platform_free_directory_list(entries, count);
+            registration_list_free(list);
+            return -1;
+        }
+    }
+    platform_free_directory_list(entries, count);
+    return 0;
+}
+
+static int registration_index_by_home(const JvmanRegistrationList *list,
+                                      const char *home) {
+    char canonical_home[JVMAN_PATH_MAX];
+    size_t i;
+    if (platform_absolute_path(home, canonical_home, sizeof(canonical_home)) != 0) {
+        return -1;
+    }
+    for (i = 0; i < list->count; ++i) {
+        char registered_home[JVMAN_PATH_MAX];
+        if (platform_absolute_path(list->items[i].home, registered_home,
+                                   sizeof(registered_home)) == 0 &&
+            jvman_path_equal(canonical_home, registered_home)) {
+            return (int)i;
+        }
+    }
+    return -1;
+}
+
+static int discovery_name_used(const JvmanRegistrationList *registrations,
+                               const JvmanDiscoveryView *views,
+                               size_t view_count, const char *name) {
+    size_t i;
+    for (i = 0; i < registrations->count; ++i) {
+        if (jvman_name_equal(registrations->items[i].name, name)) return 1;
+    }
+    for (i = 0; i < view_count; ++i) {
+        if (views[i].reserves_name && jvman_name_equal(views[i].name, name)) return 1;
+    }
+    return 0;
+}
+
+static int discovery_unique_name(const JvmanContext *context,
+                                 const char *base,
+                                 const JvmanRegistrationList *registrations,
+                                 const JvmanDiscoveryView *views,
+                                 size_t view_count, char *out, size_t out_size) {
+    unsigned int suffix = 1;
+    const char *safe_base = base && *base ? base : "unknown-java";
+    for (;;) {
+        char config_path[JVMAN_PATH_MAX];
+        char suffix_text[24] = {0};
+        size_t suffix_length = 0;
+        size_t base_length;
+        if (suffix > 1) {
+            int written = snprintf(suffix_text, sizeof(suffix_text), "-%u", suffix);
+            if (written < 0 || written >= (int)sizeof(suffix_text)) return -1;
+            suffix_length = (size_t)written;
+        }
+        if (suffix_length + 1 > out_size) return -1;
+        base_length = strlen(safe_base);
+        if (base_length + suffix_length + 1 > out_size) {
+            base_length = out_size - suffix_length - 1;
+        }
+        memcpy(out, safe_base, base_length);
+        memcpy(out + base_length, suffix_text, suffix_length + 1);
+        if (jvman_valid_name(out)) {
+            if (registration_path(context, out, config_path,
+                                  sizeof(config_path)) != 0) return -1;
+            if (!platform_path_exists(config_path) &&
+                !discovery_name_used(registrations, views, view_count, out)) {
+                return 0;
+            }
+        }
+        if (suffix == (unsigned int)-1) return -1;
+        ++suffix;
+    }
+}
+
+static int discovery_registry_enumerator(JvmanDiscoveryPathVisitor visitor,
+                                         void *visitor_context,
+                                         void *platform_context) {
+    (void)platform_context;
+    return platform_visit_java_registry_homes(visitor, visitor_context);
+}
+
+static int discovery_home_is_internal(const JvmanContext *context,
+                                      const char *home) {
+    if (jvman_path_equal(home, context->current_link) ||
+        jvman_path_is_within(context->jdks, home)) {
+        return 1;
+    }
+    return 0;
+}
+
+static void discovery_set_registered_view(JvmanDiscoveryView *view,
+                                          const char *name) {
+    snprintf(view->name, sizeof(view->name), "%s", name);
+    snprintf(view->status, sizeof(view->status), "registered:%s", name);
+    view->reserves_name = 0;
+}
+
+static int prepare_discovery_preview(const JvmanContext *context,
+                                     const JvmanDiscoveryList *discovered,
+                                     const JvmanRegistrationList *registrations,
+                                     JvmanDiscoveryView *views) {
+    size_t i;
+    for (i = 0; i < discovered->count; ++i) {
+        const JvmanDiscoveryCandidate *candidate = &discovered->items[i];
+        int existing = registration_index_by_home(registrations, candidate->home);
+        if (existing >= 0) {
+            discovery_set_registered_view(&views[i], registrations->items[existing].name);
+        } else if (candidate->internal_only ||
+                   discovery_home_is_internal(context, candidate->home)) {
+            snprintf(views[i].name, sizeof(views[i].name), "%s",
+                     candidate->suggested_name[0] ? candidate->suggested_name : "-");
+            strcpy(views[i].status, "invalid");
+        } else if (candidate->type == JVMAN_DISCOVERY_JDK && candidate->release_valid) {
+            if (discovery_unique_name(context, candidate->suggested_name,
+                                      registrations,
+                                      views, i, views[i].name,
+                                      sizeof(views[i].name)) != 0) return -1;
+            strcpy(views[i].status, "new");
+            views[i].reserves_name = 1;
+        } else {
+            snprintf(views[i].name, sizeof(views[i].name), "%s",
+                     candidate->suggested_name[0] ? candidate->suggested_name : "-");
+            strcpy(views[i].status,
+                   candidate->type == JVMAN_DISCOVERY_JRE ? "jre" : "invalid");
+        }
+    }
+    return 0;
+}
+
+static void print_discovery_results(const JvmanDiscoveryList *discovered,
+                                    const JvmanDiscoveryView *views) {
+    size_t i;
+    size_t new_count = 0;
+    size_t registered_count = 0;
+    size_t jre_count = 0;
+    size_t invalid_count = 0;
+    puts("TYPE    VERSION          VENDOR         NAME                     STATUS                   SOURCES                  JAVA_HOME");
+    for (i = 0; i < discovered->count; ++i) {
+        const JvmanDiscoveryCandidate *candidate = &discovered->items[i];
+        char sources[160];
+        jvman_discovery_format_sources(candidate->sources, sources, sizeof(sources));
+        printf("%-7s %-16s %-14s %-24s %-24s %-24s %s\n",
+               jvman_discovery_type_name(candidate->type),
+               candidate->version[0] ? candidate->version : "-",
+               candidate->vendor[0] ? candidate->vendor : "unknown",
+               views[i].name[0] ? views[i].name : "-",
+               views[i].status[0] ? views[i].status : "invalid",
+               sources[0] ? sources : "-", candidate->home);
+        if (strcmp(views[i].status, "new") == 0) ++new_count;
+        else if (strncmp(views[i].status, "registered:", 11) == 0) ++registered_count;
+        else if (strcmp(views[i].status, "jre") == 0) ++jre_count;
+        else ++invalid_count;
+    }
+    if (discovered->count == 0) puts("(no Java installations discovered)");
+    printf("Summary: %lu new, %lu registered, %lu JRE, %lu invalid\n",
+           (unsigned long)new_count, (unsigned long)registered_count,
+           (unsigned long)jre_count, (unsigned long)invalid_count);
+}
+
+static int command_discover(const JvmanContext *context, int register_found) {
+    JvmanDiscoveryOptions options;
+    JvmanDiscoveryList discovered;
+    JvmanRegistrationList registrations;
+    JvmanDiscoveryView *views = NULL;
+    PlatformLock lock;
+    int lock_held = 0;
+    int result = 1;
+    size_t i;
+    size_t added = 0;
+    int write_failed = 0;
+
+    jvman_discovery_options_init(&options);
+    options.jvman_root = context->root;
+    options.jvman_jdks = context->jdks;
+    options.registry_enumerator = discovery_registry_enumerator;
+    jvman_discovery_list_init(&discovered);
+    memset(&registrations, 0, sizeof(registrations));
+    if (jvman_discovery_scan(&discovered, &options) != 0) {
+        print_platform_error("Java discovery failed");
+        goto done;
+    }
+    jvman_discovery_sort(&discovered);
+    if (discovered.count > 0) {
+        views = (JvmanDiscoveryView *)calloc(discovered.count, sizeof(*views));
+        if (!views) {
+            print_error("out of memory preparing discovery results");
+            goto done;
+        }
+    }
+
+    if (!register_found) {
+        if (load_registrations(context, &registrations) != 0 ||
+            prepare_discovery_preview(context, &discovered,
+                                      &registrations, views) != 0) {
+            print_error("cannot compare discovered JDKs with registrations");
+            goto done;
+        }
+        print_discovery_results(&discovered, views);
+        result = 0;
+        goto done;
+    }
+
+    if (acquire_lock(context, &lock) != 0) {
+        print_platform_error("cannot lock state");
+        goto done;
+    }
+    lock_held = 1;
+    if (load_registrations(context, &registrations) != 0) {
+        print_error("cannot load registrations");
+        goto done;
+    }
+    for (i = 0; i < discovered.count; ++i) {
+        JvmanDiscoveryCandidate *candidate = &discovered.items[i];
+        JvmanDiscoveryCandidate fresh;
+        JvmanRegistration registration;
+        int existing = registration_index_by_home(&registrations, candidate->home);
+        if (existing >= 0) {
+            discovery_set_registered_view(&views[i], registrations.items[existing].name);
+            continue;
+        }
+        if (candidate->type == JVMAN_DISCOVERY_JRE) {
+            snprintf(views[i].name, sizeof(views[i].name), "%s",
+                     candidate->suggested_name[0] ? candidate->suggested_name : "-");
+            strcpy(views[i].status, "jre");
+            continue;
+        }
+        if (candidate->type != JVMAN_DISCOVERY_JDK || !candidate->release_valid ||
+            candidate->internal_only || discovery_home_is_internal(context, candidate->home)) {
+            snprintf(views[i].name, sizeof(views[i].name), "%s",
+                     candidate->suggested_name[0] ? candidate->suggested_name : "-");
+            strcpy(views[i].status, "invalid");
+            continue;
+        }
+        if (jvman_discovery_probe_home(candidate->home, candidate->sources,
+                                       candidate->vendor, &fresh) != 0 ||
+            fresh.type != JVMAN_DISCOVERY_JDK || !fresh.release_valid ||
+            discovery_home_is_internal(context, fresh.home)) {
+            snprintf(views[i].name, sizeof(views[i].name), "%s",
+                     candidate->suggested_name[0] ? candidate->suggested_name : "-");
+            strcpy(views[i].status, "invalid");
+            fprintf(stderr, "jvman: discovered JDK disappeared or became invalid: %s\n",
+                    candidate->home);
+            continue;
+        }
+        fresh.sources = candidate->sources;
+        *candidate = fresh;
+        existing = registration_index_by_home(&registrations, candidate->home);
+        if (existing >= 0) {
+            discovery_set_registered_view(&views[i], registrations.items[existing].name);
+            continue;
+        }
+        if (discovery_unique_name(context, candidate->suggested_name,
+                                  &registrations,
+                                  views, i, views[i].name,
+                                  sizeof(views[i].name)) != 0 ||
+            registration_list_reserve(&registrations, registrations.count + 1) != 0) {
+            print_error("cannot allocate a unique discovered JDK name");
+            strcpy(views[i].status, "error");
+            write_failed = 1;
+            continue;
+        }
+        memset(&registration, 0, sizeof(registration));
+        strcpy(registration.name, views[i].name);
+        strcpy(registration.home, candidate->home);
+        registration.managed = 0;
+        if (registration_exists(context, registration.name)) {
+            print_error("a discovered JDK name became occupied while registering");
+            strcpy(views[i].status, "error");
+            write_failed = 1;
+            continue;
+        }
+        if (write_registration(context, &registration) != 0) {
+            print_platform_error("cannot register discovered JDK");
+            strcpy(views[i].status, "error");
+            write_failed = 1;
+            continue;
+        }
+        registrations.items[registrations.count++] = registration;
+        discovery_set_registered_view(&views[i], registration.name);
+        ++added;
+    }
+    print_discovery_results(&discovered, views);
+    printf("Registered %lu new JDK%s.\n", (unsigned long)added, added == 1 ? "" : "s");
+    result = write_failed ? 1 : 0;
+
+done:
+    if (lock_held) platform_lock_release(&lock);
+    registration_list_free(&registrations);
+    free(views);
+    jvman_discovery_list_free(&discovered);
+    return result;
+}
+
+static int command_current(const JvmanContext *context) {
+    char name[JVMAN_NAME_MAX + 1];
+    JvmanRegistration registration;
+    if (current_name(context, name, sizeof(name)) != 0 ||
+        read_registration(context, name, &registration) != 0) {
+        puts("none");
+        return 0;
+    }
+    printf("%s\n", name);
+    return 0;
+}
+
+static int command_which(const JvmanContext *context, const char *requested) {
+    char name[JVMAN_NAME_MAX + 1];
+    JvmanRegistration registration;
+    if (requested) {
+        if (strlen(requested) > JVMAN_NAME_MAX) return print_error("invalid version name");
+        strcpy(name, requested);
+    } else if (current_name(context, name, sizeof(name)) != 0) {
+        return print_error("no JDK is currently selected");
+    }
+    if (read_registration(context, name, &registration) != 0) {
+        return print_error("unknown JDK version");
+    }
+    printf("%s\n", registration.home);
+    return 0;
+}
+
+static int command_remove(const JvmanContext *context, const char *name) {
+    JvmanRegistration registration;
+    PlatformLock lock;
+    char active[JVMAN_NAME_MAX + 1] = {0};
+    char config[JVMAN_PATH_MAX];
+    char install_dir[JVMAN_PATH_MAX];
+    int result = 1;
+    if (!jvman_valid_name(name)) return print_error("unknown JDK version");
+    if (acquire_lock(context, &lock) != 0) return print_platform_error("cannot lock state");
+    if (read_registration(context, name, &registration) != 0) {
+        print_error("unknown JDK version");
+        goto done;
+    }
+    current_name(context, active, sizeof(active));
+    if (jvman_name_equal(active, name)) {
+        print_error("cannot remove the current JDK; switch to another version first");
+        goto done;
+    }
+    if (registration.managed) {
+        char canonical_install[JVMAN_PATH_MAX];
+        char canonical_home[JVMAN_PATH_MAX];
+        char linked_home[JVMAN_PATH_MAX];
+        if (jvman_path_join(install_dir, sizeof(install_dir), context->jdks, name) != 0 ||
+            platform_absolute_path(install_dir, canonical_install, sizeof(canonical_install)) != 0 ||
+            platform_absolute_path(registration.home, canonical_home, sizeof(canonical_home)) != 0 ||
+            !(jvman_path_equal(canonical_install, canonical_home) ||
+              jvman_path_is_within(canonical_install, canonical_home))) {
+            print_error("managed registration is corrupt; refusing to delete files");
+            goto done;
+        }
+        if (platform_absolute_path(context->current_link, linked_home,
+                                   sizeof(linked_home)) == 0 &&
+            (jvman_path_equal(canonical_install, linked_home) ||
+             jvman_path_is_within(canonical_install, linked_home))) {
+            print_error("cannot remove a managed JDK used by the current link");
+            goto done;
+        }
+        if (platform_remove_tree(canonical_install) != 0) {
+            print_platform_error("cannot remove managed JDK files");
+            goto done;
+        }
+    }
+    if (registration_path(context, name, config, sizeof(config)) != 0 ||
+        platform_remove_file(config) != 0) {
+        print_platform_error("cannot remove registration");
+        goto done;
+    }
+    printf("Removed %s%s\n", name, registration.managed ? " and its managed files" : " registration");
+    result = 0;
+done:
+    platform_lock_release(&lock);
+    return result;
+}
+
+static int command_exec(const JvmanContext *context, const char *name, char **command) {
+    JvmanRegistration registration;
+    char bin[JVMAN_PATH_MAX];
+    int result;
+    if (!command || !command[0]) return print_error("exec requires a command");
+    if (read_registration(context, name, &registration) != 0) {
+        return print_error("unknown JDK version");
+    }
+    if (find_jdk_home(registration.home, registration.home, sizeof(registration.home)) != 0 ||
+        jvman_path_join(bin, sizeof(bin), registration.home, "bin") != 0) {
+        return print_error("registered path is not a valid JDK anymore");
+    }
+    if (platform_set_environment("JAVA_HOME", registration.home) != 0 ||
+        platform_prepend_path(bin) != 0) {
+        return print_platform_error("cannot construct child environment");
+    }
+    result = platform_spawn_wait(command);
+    if (result < 0) return print_platform_error("cannot execute command");
+    return result;
+}
+
+static int command_init(const JvmanContext *context, const char *shell) {
+    char quoted[JVMAN_PATH_MAX * 4 + 3];
+    if (!shell || !*shell) {
+#if defined(_WIN32)
+        shell = "powershell";
+#else
+        shell = "sh";
+#endif
+    }
+    if (strcmp(shell, "powershell") == 0 || strcmp(shell, "pwsh") == 0) {
+        jvman_shell_quote_powershell(context->current_link, quoted, sizeof(quoted));
+        printf("$env:JAVA_HOME = %s\n", quoted);
+        puts("$jvmanJavaBin = Join-Path $env:JAVA_HOME 'bin'");
+        puts("$jvmanPathParts = @($env:Path -split ';' | Where-Object { $_ -and $_ -ne $jvmanJavaBin })");
+        puts("$env:Path = (@($jvmanJavaBin) + $jvmanPathParts) -join ';'");
+        puts("Remove-Variable jvmanJavaBin,jvmanPathParts -ErrorAction SilentlyContinue");
+        return 0;
+    }
+    if (strcmp(shell, "cmd") == 0) {
+        printf("set \"JAVA_HOME=%s\"\n", context->current_link);
+        puts("if defined PATH (set \"PATH=%JAVA_HOME%\\bin;%PATH%\") else set \"PATH=%JAVA_HOME%\\bin\"");
+        return 0;
+    }
+    if (strcmp(shell, "sh") == 0 || strcmp(shell, "bash") == 0 ||
+        strcmp(shell, "zsh") == 0) {
+        jvman_shell_quote_sh(context->current_link, quoted, sizeof(quoted));
+        printf("export JAVA_HOME=%s\n", quoted);
+        puts("if [ -n \"${PATH:-}\" ]; then case \":$PATH:\" in *\":$JAVA_HOME/bin:\"*) ;; *) export PATH=\"$JAVA_HOME/bin:$PATH\" ;; esac; else export PATH=\"$JAVA_HOME/bin\"; fi");
+        return 0;
+    }
+    return print_error("unsupported shell; use powershell, cmd, or sh");
+}
+
+static int command_doctor(const JvmanContext *context) {
+    int warnings = 0;
+    char active[JVMAN_NAME_MAX + 1] = {0};
+    char expected_java[JVMAN_PATH_MAX];
+    char actual_java[JVMAN_PATH_MAX];
+    const char *java_home = getenv("JAVA_HOME");
+    printf("[ok]   data home: %s\n", context->root);
+    if (current_name(context, active, sizeof(active)) == 0) {
+        JvmanRegistration registration;
+        char registered_home[JVMAN_PATH_MAX];
+        char linked_home[JVMAN_PATH_MAX];
+        if (read_registration(context, active, &registration) == 0 &&
+            platform_absolute_path(registration.home, registered_home,
+                                   sizeof(registered_home)) == 0 &&
+            platform_absolute_path(context->current_link, linked_home,
+                                   sizeof(linked_home)) == 0 &&
+            platform_is_directory(registration.home) &&
+            platform_is_directory(context->current_link) &&
+            jvman_path_equal(registered_home, linked_home)) {
+            printf("[ok]   current: %s -> %s\n", active, registration.home);
+        } else {
+            printf("[warn] current state and directory link do not match\n");
+            ++warnings;
+        }
+    } else {
+        printf("[warn] no current JDK selected\n");
+        ++warnings;
+    }
+    if (java_home && jvman_path_equal(java_home, context->current_link)) {
+        printf("[ok]   JAVA_HOME points to the stable current path\n");
+    } else {
+        printf("[warn] JAVA_HOME is %s; expected %s\n",
+               java_home && *java_home ? java_home : "not set", context->current_link);
+        ++warnings;
+    }
+    if (jvman_path_join3(expected_java, sizeof(expected_java), context->current_link,
+                         "bin", JVMAN_JAVA_EXE) == 0 &&
+        platform_find_executable(JVMAN_JAVA_EXE, actual_java, sizeof(actual_java)) == 0) {
+        if (jvman_path_equal(actual_java, expected_java)) {
+            printf("[ok]   PATH resolves java through jvman\n");
+        } else {
+            printf("[warn] PATH resolves java to %s\n", actual_java);
+            ++warnings;
+        }
+    } else {
+        printf("[warn] java is not available on PATH\n");
+        ++warnings;
+    }
+#if defined(_WIN32)
+    if (platform_find_trusted_executable("curl.exe", actual_java, sizeof(actual_java)) == 0)
+        printf("[ok]   downloader: %s\n", actual_java);
+    else { printf("[warn] curl.exe is required for remote installs\n"); ++warnings; }
+    if (platform_find_trusted_executable("tar.exe", actual_java, sizeof(actual_java)) == 0)
+        printf("[ok]   extractor: %s\n", actual_java);
+    else { printf("[warn] tar.exe is required for installs\n"); ++warnings; }
+#else
+    if (platform_find_trusted_executable("curl", actual_java, sizeof(actual_java)) == 0)
+        printf("[ok]   downloader: %s\n", actual_java);
+    else { printf("[warn] curl is required for remote installs\n"); ++warnings; }
+    if (platform_find_trusted_executable("tar", actual_java, sizeof(actual_java)) == 0)
+        printf("[ok]   extractor: %s\n", actual_java);
+    else { printf("[warn] tar is required for installs\n"); ++warnings; }
+#endif
+    if (warnings) {
+        printf("%d warning%s found. Evaluate `jvman init` in your shell after selecting a JDK.\n",
+               warnings, warnings == 1 ? "" : "s");
+        return 1;
+    }
+    puts("No problems found.");
+    return 0;
+}
+
+static int select_extracted_directory(const char *staging, char *out, size_t out_size) {
+    char **entries = NULL;
+    size_t count = 0;
+    size_t i;
+    size_t directories = 0;
+    char candidate[JVMAN_PATH_MAX] = {0};
+    if (platform_list_directory(staging, &entries, &count) != 0) return -1;
+    for (i = 0; i < count; ++i) {
+        char path[JVMAN_PATH_MAX];
+        if (jvman_path_join(path, sizeof(path), staging, entries[i]) == 0 &&
+            platform_is_directory(path)) {
+            ++directories;
+            if (strlen(path) < sizeof(candidate)) strcpy(candidate, path);
+        }
+    }
+    platform_free_directory_list(entries, count);
+    if (directories != 1 || !candidate[0] || strlen(candidate) + 1 > out_size) return -1;
+    strcpy(out, candidate);
+    return 0;
+}
+
+static int valid_sha256_text(const char *text) {
+    size_t i;
+    if (!text || strlen(text) != 64) return 0;
+    for (i = 0; i < 64; ++i) {
+        if (!isxdigit((unsigned char)text[i])) return 0;
+    }
+    return 1;
+}
+
+static int download_metadata(int major, const char *metadata_path,
+                             char *download_url, size_t url_size,
+                             char *checksum, size_t checksum_size,
+                             char *exact_version, size_t version_size) {
+    char url[1024];
+    char *arguments[26];
+    char *json;
+    int exit_code;
+#if defined(_WIN32)
+    char downloader_name[] = "curl.exe";
+#else
+    char downloader_name[] = "curl";
+#endif
+    char downloader[JVMAN_PATH_MAX];
+    if (snprintf(url, sizeof(url),
+                 "https://api.adoptium.net/v3/assets/latest/%d/hotspot?architecture=%s&heap_size=normal&image_type=jdk&jvm_impl=hotspot&os=%s&page=0&page_size=1&project=jdk&sort_method=DEFAULT&sort_order=DESC&vendor=eclipse",
+                 major, platform_arch_name(), platform_os_name()) >= (int)sizeof(url)) return -1;
+    if (platform_find_trusted_executable(downloader_name, downloader,
+                                         sizeof(downloader)) != 0) return -1;
+    arguments[0] = downloader;
+    arguments[1] = "--fail";
+    arguments[2] = "--location";
+    arguments[3] = "--silent";
+    arguments[4] = "--show-error";
+    arguments[5] = "--retry";
+    arguments[6] = "2";
+    arguments[7] = "--header";
+    arguments[8] = "User-Agent: jvman/" JVMAN_VERSION;
+    arguments[9] = "--connect-timeout";
+    arguments[10] = "30";
+    arguments[11] = "--proto";
+    arguments[12] = "=https";
+    arguments[13] = "--proto-redir";
+    arguments[14] = "=https";
+    arguments[15] = "--output";
+    arguments[16] = (char *)metadata_path;
+    arguments[17] = "--max-time";
+    arguments[18] = "60";
+    arguments[19] = "--speed-limit";
+    arguments[20] = "1024";
+    arguments[21] = "--speed-time";
+    arguments[22] = "30";
+    arguments[23] = url;
+    arguments[24] = NULL;
+    exit_code = platform_spawn_wait(arguments);
+    if (exit_code != 0) return -1;
+    json = jvman_read_all(metadata_path, NULL);
+    if (!json) return -1;
+    if (jvman_json_string_field(json, "\"package\"", "link", download_url, url_size) != 0 ||
+        jvman_json_string_field(json, "\"package\"", "checksum", checksum, checksum_size) != 0) {
+        free(json);
+        return -1;
+    }
+    if (jvman_json_string_field(json, "\"version\"", "openjdk_version",
+                                exact_version, version_size) != 0) {
+        snprintf(exact_version, version_size, "%d", major);
+    }
+    free(json);
+    if (strncmp(download_url, "https://", 8) != 0 || !valid_sha256_text(checksum)) {
+        return -1;
+    }
+    {
+        char *version_end;
+        long resolved_major = strtol(exact_version, &version_end, 10);
+        int legacy_java8 = major == 8 && strncmp(exact_version, "1.8.", 4) == 0;
+        if (!legacy_java8 && (version_end == exact_version || resolved_major != major)) {
+            return -1;
+        }
+    }
+    return 0;
+}
+
+static int download_archive(const char *url, const char *destination) {
+    char *arguments[24];
+#if defined(_WIN32)
+    char downloader_name[] = "curl.exe";
+#else
+    char downloader_name[] = "curl";
+#endif
+    char downloader[JVMAN_PATH_MAX];
+    if (platform_find_trusted_executable(downloader_name, downloader,
+                                         sizeof(downloader)) != 0) return -1;
+    arguments[0] = downloader;
+    arguments[1] = "--fail";
+    arguments[2] = "--location";
+    arguments[3] = "--retry";
+    arguments[4] = "2";
+    arguments[5] = "--progress-bar";
+    arguments[6] = "--header";
+    arguments[7] = "User-Agent: jvman/" JVMAN_VERSION;
+    arguments[8] = "--output";
+    arguments[9] = (char *)destination;
+    arguments[10] = "--connect-timeout";
+    arguments[11] = "30";
+    arguments[12] = "--proto";
+    arguments[13] = "=https";
+    arguments[14] = "--proto-redir";
+    arguments[15] = "=https";
+    arguments[16] = "--speed-limit";
+    arguments[17] = "1024";
+    arguments[18] = "--speed-time";
+    arguments[19] = "60";
+    arguments[20] = (char *)url;
+    arguments[21] = NULL;
+    return platform_spawn_wait(arguments);
+}
+
+static int extract_archive(const char *archive, const char *destination) {
+#if defined(_WIN32)
+    char extractor_name[] = "tar.exe";
+#else
+    char extractor_name[] = "tar";
+#endif
+    char extractor[JVMAN_PATH_MAX];
+    char *arguments[] = {extractor, "-xf", (char *)archive, "-C", (char *)destination, NULL};
+    if (platform_find_trusted_executable(extractor_name, extractor,
+                                         sizeof(extractor)) != 0) return -1;
+    return platform_spawn_wait(arguments);
+}
+
+static int command_install(const JvmanContext *context, const char *version,
+                           const char *name_option, const char *archive_option,
+                           const char *checksum_option) {
+    char name[JVMAN_NAME_MAX + 1];
+    char metadata[JVMAN_PATH_MAX] = {0};
+    char archive[JVMAN_PATH_MAX] = {0};
+    char stage[JVMAN_PATH_MAX] = {0};
+    char extracted[JVMAN_PATH_MAX] = {0};
+    char detected_home[JVMAN_PATH_MAX] = {0};
+    char install_dir[JVMAN_PATH_MAX] = {0};
+    char final_home[JVMAN_PATH_MAX] = {0};
+    char local_source[JVMAN_PATH_MAX] = {0};
+    char url[2048] = {0};
+    char checksum[80] = {0};
+    char exact_version[128] = {0};
+    char expected_extension[16];
+    unsigned char digest[32];
+    int major = 0;
+    int remote = archive_option == NULL;
+    int moved = 0;
+    int result = 1;
+    PlatformLock lock;
+    JvmanRegistration registration;
+    const char *archive_source = archive;
+
+    if (!version || !jvman_valid_name(version)) return print_error("invalid version");
+    if (name_option) {
+        if (!jvman_valid_name(name_option)) return print_error("invalid --name value");
+        strcpy(name, name_option);
+    } else {
+        strcpy(name, version);
+    }
+    if (remote && jvman_parse_major(version, &major) != 0) {
+        return print_error("remote install currently accepts a Java major version, for example 17 or 21");
+    }
+    if (remote && (strcmp(platform_arch_name(), "unsupported") == 0 ||
+                   strcmp(platform_os_name(), "unsupported") == 0)) {
+        return print_error("remote install is not supported on this operating system or CPU architecture");
+    }
+    if (checksum_option && !valid_sha256_text(checksum_option)) {
+        return print_error("--sha256 must contain 64 hexadecimal characters");
+    }
+    if (acquire_lock(context, &lock) != 0) return print_platform_error("cannot lock state");
+    if (registration_exists(context, name)) {
+        print_error("that version name is already registered");
+        goto cleanup;
+    }
+    if (jvman_path_join(install_dir, sizeof(install_dir), context->jdks, name) != 0 ||
+        platform_path_exists(install_dir)) {
+        print_error("managed install directory already exists");
+        goto cleanup;
+    }
+    snprintf(expected_extension, sizeof(expected_extension), "%s", platform_archive_extension());
+    if (snprintf(metadata, sizeof(metadata), "%s%c%s-%lu.json", context->cache,
+                 JVMAN_DIR_SEP, name, platform_process_id()) >= (int)sizeof(metadata) ||
+        snprintf(archive, sizeof(archive), "%s%c%s-%lu%s", context->cache,
+                 JVMAN_DIR_SEP, name, platform_process_id(), expected_extension) >= (int)sizeof(archive) ||
+        snprintf(stage, sizeof(stage), "%s%cinstall-%s-%lu", context->staging,
+                 JVMAN_DIR_SEP, name, platform_process_id()) >= (int)sizeof(stage)) {
+        print_error("installation path is too long");
+        goto cleanup;
+    }
+    if (!remote &&
+        (platform_absolute_path(archive_option, local_source, sizeof(local_source)) != 0 ||
+         !platform_is_file(local_source))) {
+        print_error("local archive does not exist");
+        goto cleanup;
+    }
+    if (!remote && jvman_path_equal(local_source, archive)) {
+        print_error("local archive conflicts with the temporary cache path");
+        goto cleanup;
+    }
+    platform_remove_file(metadata);
+    platform_remove_file(archive);
+    if (platform_path_exists(stage) && platform_remove_tree(stage) != 0) {
+        print_platform_error("cannot clear stale staging directory");
+        goto cleanup;
+    }
+    if (platform_mkdirs(stage) != 0) {
+        print_platform_error("cannot create staging directory");
+        goto cleanup;
+    }
+    if (remote) {
+        printf("Resolving Temurin %d for %s/%s...\n", major,
+               platform_os_name(), platform_arch_name());
+        if (download_metadata(major, metadata, url, sizeof(url), checksum,
+                              sizeof(checksum), exact_version, sizeof(exact_version)) != 0) {
+            print_error("could not resolve a Temurin package from Adoptium");
+            goto cleanup;
+        }
+        printf("Downloading Temurin %s...\n", exact_version);
+        if (download_archive(url, archive) != 0) {
+            print_error("download failed");
+            goto cleanup;
+        }
+    } else {
+        if (platform_copy_file(local_source, archive) != 0) {
+            print_platform_error("cannot snapshot local archive");
+            goto cleanup;
+        }
+        if (checksum_option) strcpy(checksum, checksum_option);
+    }
+    if (checksum[0]) {
+        if (jvman_sha256_file(archive_source, digest) != 0 ||
+            !jvman_hex_equal(digest, sizeof(digest), checksum)) {
+            print_error("archive SHA-256 verification failed");
+            goto cleanup;
+        }
+        if (remote && checksum_option &&
+            !jvman_hex_equal(digest, sizeof(digest), checksum_option)) {
+            print_error("archive does not match the SHA-256 pinned on the command line");
+            goto cleanup;
+        }
+        puts("Archive checksum verified.");
+    }
+    puts("Extracting JDK...");
+    if (extract_archive(archive_source, stage) != 0) {
+        print_error("archive extraction failed");
+        goto cleanup;
+    }
+    if (select_extracted_directory(stage, extracted, sizeof(extracted)) != 0) {
+        print_error("archive must contain one top-level JDK directory");
+        goto cleanup;
+    }
+    if (find_jdk_home(extracted, detected_home, sizeof(detected_home)) != 0) {
+        print_error("archive does not contain a valid JDK");
+        goto cleanup;
+    }
+    if (jvman_path_equal(extracted, detected_home)) {
+        strcpy(final_home, install_dir);
+    } else if (jvman_path_is_within(extracted, detected_home) &&
+               snprintf(final_home, sizeof(final_home), "%s%s", install_dir,
+                        detected_home + strlen(extracted)) < (int)sizeof(final_home)) {
+        /* final_home now preserves macOS Contents/Home below the install root. */
+    } else {
+        print_error("invalid JDK home inside archive");
+        goto cleanup;
+    }
+    if (platform_move(extracted, install_dir) != 0) {
+        print_platform_error("cannot commit installed JDK");
+        goto cleanup;
+    }
+    moved = 1;
+    {
+        char canonical_home[JVMAN_PATH_MAX];
+        if (platform_absolute_path(final_home, canonical_home, sizeof(canonical_home)) != 0) {
+            print_platform_error("cannot canonicalize installed JDK home");
+            goto cleanup;
+        }
+        strcpy(final_home, canonical_home);
+    }
+    strcpy(registration.name, name);
+    strcpy(registration.home, final_home);
+    registration.managed = 1;
+    if (write_registration(context, &registration) != 0) {
+        print_platform_error("cannot save installed JDK registration");
+        goto cleanup;
+    }
+    printf("Installed %s -> %s\n", name, final_home);
+    printf("Run `jvman use %s` to activate it.\n", name);
+    result = 0;
+cleanup:
+    if (metadata[0]) platform_remove_file(metadata);
+    if (archive[0]) platform_remove_file(archive);
+    if (stage[0] && platform_path_exists(stage)) platform_remove_tree(stage);
+    if (result != 0 && moved && install_dir[0]) platform_remove_tree(install_dir);
+    platform_lock_release(&lock);
+    return result;
+}
+
+static void print_usage(void) {
+    puts("jvman " JVMAN_VERSION " - lightweight Java version manager");
+    puts("");
+    puts("Usage:");
+    puts("  jvman install <major> [--name <name>] [--sha256 <hex>]");
+    puts("  jvman install <name> --archive <file> [--sha256 <hex>]");
+    puts("  jvman add <name> <jdk-home>");
+    puts("  jvman use <name>");
+    puts("  jvman list");
+    puts("  jvman discover [--register]");
+    puts("  jvman current");
+    puts("  jvman which [name]");
+    puts("  jvman remove <name>");
+    puts("  jvman exec <name> [--] <command> [args...]");
+    puts("  jvman init [powershell|cmd|sh]");
+    puts("  jvman doctor");
+    puts("  jvman home");
+}
+
+static int parse_install(const JvmanContext *context, int argc, char **argv) {
+    const char *name = NULL;
+    const char *archive = NULL;
+    const char *checksum = NULL;
+    int i;
+    if (argc < 3) return print_error("install requires a version");
+    for (i = 3; i < argc; ++i) {
+        if (strcmp(argv[i], "--name") == 0 && i + 1 < argc) name = argv[++i];
+        else if (strcmp(argv[i], "--archive") == 0 && i + 1 < argc) archive = argv[++i];
+        else if (strcmp(argv[i], "--sha256") == 0 && i + 1 < argc) checksum = argv[++i];
+        else return print_error("unknown or incomplete install option");
+    }
+    return command_install(context, argv[2], name, archive, checksum);
+}
+
+int jvman_run(JvmanContext *context, int argc, char **argv) {
+    const char *command;
+    if (!context || argc < 2) {
+        print_usage();
+        return argc < 2 ? 0 : 1;
+    }
+    command = argv[1];
+    if (strcmp(command, "help") == 0 || strcmp(command, "--help") == 0 ||
+        strcmp(command, "-h") == 0) {
+        print_usage(); return 0;
+    }
+    if (strcmp(command, "version") == 0 || strcmp(command, "--version") == 0 ||
+        strcmp(command, "-v") == 0) {
+        puts(JVMAN_VERSION); return 0;
+    }
+    if (strcmp(command, "home") == 0) { puts(context->root); return 0; }
+    if (strcmp(command, "install") == 0) return parse_install(context, argc, argv);
+    if (strcmp(command, "add") == 0)
+        return argc == 4 ? command_add(context, argv[2], argv[3]) :
+               print_error("usage: jvman add <name> <jdk-home>");
+    if (strcmp(command, "use") == 0 || strcmp(command, "default") == 0)
+        return argc == 3 ? command_use(context, argv[2]) :
+               print_error("usage: jvman use <name>");
+    if (strcmp(command, "list") == 0 || strcmp(command, "ls") == 0)
+        return command_list(context);
+    if (strcmp(command, "discover") == 0) {
+        if (argc == 2) return command_discover(context, 0);
+        if (argc == 3 && strcmp(argv[2], "--register") == 0) {
+            return command_discover(context, 1);
+        }
+        return print_error("usage: jvman discover [--register]");
+    }
+    if (strcmp(command, "current") == 0) return command_current(context);
+    if (strcmp(command, "which") == 0)
+        return argc <= 3 ? command_which(context, argc == 3 ? argv[2] : NULL) :
+               print_error("usage: jvman which [name]");
+    if (strcmp(command, "remove") == 0 || strcmp(command, "uninstall") == 0)
+        return argc == 3 ? command_remove(context, argv[2]) :
+               print_error("usage: jvman remove <name>");
+    if (strcmp(command, "exec") == 0) {
+        int command_index = 3;
+        if (argc > 3 && strcmp(argv[3], "--") == 0) command_index = 4;
+        return argc > command_index ? command_exec(context, argv[2], argv + command_index) :
+               print_error("usage: jvman exec <name> [--] <command> [args...]");
+    }
+    if (strcmp(command, "init") == 0)
+        return argc <= 3 ? command_init(context, argc == 3 ? argv[2] : NULL) :
+               print_error("usage: jvman init [powershell|cmd|sh]");
+    if (strcmp(command, "doctor") == 0) return command_doctor(context);
+    print_usage();
+    return print_error("unknown command");
+}
