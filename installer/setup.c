@@ -25,6 +25,8 @@
 #define INSTALLER_COMMAND_CHARS 32768
 #define INSTALLER_COPY_BUFFER_SIZE (64u * 1024u)
 #define INSTALLER_TEMP_ATTEMPTS 128u
+#define INSTALLER_MUTEX_NAME L"Local\\jvman.Setup.1F07284D-788B-4F89-A327-DA0F15511708"
+#define INSTALLER_ALREADY_RUNNING_EXIT 3
 
 /* MinGW headers hide FileDispositionInfoEx unless NTDDI_VERSION is raised,
  * while the numeric FILE_INFO_BY_HANDLE_CLASS value is stable on Windows 10.
@@ -126,6 +128,22 @@ static int installer_is_switch(const wchar_t *value, const wchar_t *name) {
     return installer_option_equal(value, name) ||
            (value && value[0] == L'-' && value[1] == L'-' &&
             installer_option_equal(value + 1, name));
+}
+
+static HANDLE installer_acquire_single_instance(int *already_running) {
+    HANDLE mutex;
+    DWORD error;
+    if (!already_running) return NULL;
+    *already_running = 0;
+    mutex = CreateMutexW(NULL, TRUE, INSTALLER_MUTEX_NAME);
+    if (!mutex) return NULL;
+    error = GetLastError();
+    if (error == ERROR_ALREADY_EXISTS) {
+        *already_running = 1;
+        CloseHandle(mutex);
+        return NULL;
+    }
+    return mutex;
 }
 
 static int installer_parse_value(const wchar_t *argument, const wchar_t *name,
@@ -1340,6 +1358,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous,
     int argc;
     wchar_t **argv;
     InstallerOptions options;
+    HANDLE instance_mutex;
+    int already_running;
     int parse_result;
     int result;
     (void)instance;
@@ -1373,9 +1393,31 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous,
         CoUninitialize();
         return 2;
     }
+    /* Serialize file and registry changes. The cleanup worker is excluded
+     * because uninstall starts it while this process still owns the mutex. */
+    instance_mutex = installer_acquire_single_instance(&already_running);
+    if (!instance_mutex) {
+        if (already_running) {
+            installer_report(
+                L"jvman Setup",
+                L"Another jvman Setup instance is already running.\n\n"
+                L"jvman \u5b89\u88c5\u7a0b\u5e8f\u5df2\u5728\u8fd0\u884c\u3002",
+                MB_OK | MB_ICONINFORMATION, options.silent);
+        } else {
+            installer_report(
+                L"jvman Setup",
+                L"Cannot create the installer instance lock.",
+                MB_OK | MB_ICONERROR, options.silent);
+        }
+        LocalFree(argv);
+        CoUninitialize();
+        return already_running ? INSTALLER_ALREADY_RUNNING_EXIT : 2;
+    }
     if (!options.silent && !options.uninstall && !options.portable) {
         parse_result = installer_prepare_gui_options(&options);
         if (parse_result != 0) {
+            ReleaseMutex(instance_mutex);
+            CloseHandle(instance_mutex);
             LocalFree(argv);
             CoUninitialize();
             return parse_result == 1 ? 0 : 1;
@@ -1393,6 +1435,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous,
                 L"jvman Setup", MB_OK | MB_ICONINFORMATION);
         }
     }
+    ReleaseMutex(instance_mutex);
+    CloseHandle(instance_mutex);
     LocalFree(argv);
     CoUninitialize();
     return result;

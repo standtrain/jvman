@@ -34,6 +34,7 @@ $setupPath = Resolve-ExistingFile $Setup 'Setup'
 $binaryPath = Resolve-ExistingFile $Binary 'Payload binary'
 $root = Join-Path ([IO.Path]::GetTempPath()) ("jvman-installer-test-" + [guid]::NewGuid().ToString('N'))
 $portableDir = Join-Path $root '中文 path with spaces'
+$blockedDir = Join-Path $root 'blocked-target'
 $corruptDir = Join-Path $root 'corrupt-target'
 $corruptSetup = Join-Path $root 'corrupt setup.exe'
 $beforePath = [Environment]::GetEnvironmentVariable('Path', 'User')
@@ -43,6 +44,23 @@ $beforeArpState = Test-Path -LiteralPath 'Registry::HKEY_CURRENT_USER\Software\M
 
 New-Item -ItemType Directory -Path $portableDir -Force | Out-Null
 try {
+    $createdNew = $false
+    $instanceGuard = [Threading.Mutex]::new(
+        $false,
+        'Local\jvman.Setup.1F07284D-788B-4F89-A327-DA0F15511708',
+        [ref]$createdNew)
+    try {
+        Assert-Equal $true $createdNew 'Installer instance test mutex already existed'
+        $blockedArguments = @('/S', '/PORTABLE', "/DIR=`"$blockedDir`"")
+        Assert-Equal 3 (Invoke-GuiProcess $setupPath $blockedArguments) 'Concurrent installer was not rejected'
+        if (Test-Path -LiteralPath (Join-Path $blockedDir 'jvman.exe')) {
+            throw 'Rejected concurrent installer wrote a payload'
+        }
+    }
+    finally {
+        $instanceGuard.Dispose()
+    }
+
     $arguments = @('/S', '/PORTABLE', "/DIR=`"$portableDir`"")
     Assert-Equal 0 (Invoke-GuiProcess $setupPath $arguments) 'Portable install failed'
 
