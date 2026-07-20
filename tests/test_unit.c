@@ -1,3 +1,4 @@
+#include "download_source.h"
 #include "discovery.h"
 #include "platform.h"
 #include "sha256.h"
@@ -136,6 +137,207 @@ static void test_json(void) {
               "[{\"package\":{\"link\":\"https://first\"}},"
               "{\"package\":{\"checksum\":\"second\"}}]",
               "\"package\"", "checksum", value, sizeof(value)) != 0);
+}
+
+static void test_download_sources(void) {
+    static const char checksum[] =
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    const JvmanDownloadSource *adoptium =
+        jvman_download_source_find("adoptium");
+    const JvmanDownloadSource *foojay =
+        jvman_download_source_find("foojay");
+    char url[2048];
+    char parsed_url[256];
+    char parsed_checksum[65];
+    char version[128];
+    char detail_url[256];
+    char json[1024];
+
+    CHECK(adoptium == jvman_download_source_default());
+    CHECK(foojay != NULL);
+    CHECK(jvman_download_source_count() == 2);
+    CHECK(jvman_download_source_at(2) == NULL);
+    CHECK(jvman_download_source_find("FOOJAY") == NULL);
+    CHECK(jvman_download_source_find("../foojay") == NULL);
+    CHECK(jvman_download_source_build_metadata_url(
+              adoptium, 21, "windows", "x64", ".zip",
+              url, sizeof(url)) == 0);
+    CHECK(strstr(url, "https://api.adoptium.net/v3/assets/latest/21/") == url);
+    CHECK(strstr(url, "architecture=x64") != NULL);
+    CHECK(strstr(url, "os=windows") != NULL);
+    CHECK(jvman_download_source_build_metadata_url(
+              foojay, 17, "mac", "aarch64", ".tar.gz",
+              url, sizeof(url)) == 0);
+    CHECK(strstr(url, "https://api.foojay.io/disco/v3.0/packages?") == url);
+    CHECK(strstr(url, "operating_system=macos") != NULL);
+    CHECK(strstr(url, "archive_type=tar.gz") != NULL);
+
+    CHECK(snprintf(
+              json, sizeof(json),
+              "[{\"binary\":{\"package\":{\"checksum\":\"%s\","
+              "\"link\":\"https:\\/\\/example.test\\/jdk.zip\"}},"
+              "\"version\":{\"openjdk_version\":\"21.0.8+9-LTS\"}}]",
+              checksum) < (int)sizeof(json));
+    CHECK(jvman_download_source_parse_catalog(
+              adoptium, json, 21, detail_url, sizeof(detail_url), version,
+              sizeof(version)) == 0);
+    CHECK(detail_url[0] == '\0');
+    CHECK(jvman_download_source_parse_package(
+              adoptium, json, parsed_url, sizeof(parsed_url),
+              parsed_checksum, sizeof(parsed_checksum)) == 0);
+    CHECK(strcmp(parsed_url, "https://example.test/jdk.zip") == 0);
+    CHECK(strcmp(parsed_checksum, checksum) == 0);
+    CHECK(strcmp(version, "21.0.8+9-LTS") == 0);
+
+    CHECK(snprintf(
+              json, sizeof(json),
+              "{\"result\":[{\"java_version\":\"17.0.15+6\",\"links\":{"
+              "\"pkg_info_uri\":\"https://api.foojay.io/disco/v3.0/ids/test\"}}]}")
+          < (int)sizeof(json));
+    CHECK(jvman_download_source_parse_catalog(
+              foojay, json, 17, detail_url, sizeof(detail_url), version,
+              sizeof(version)) == 0);
+    CHECK(strcmp(detail_url,
+                 "https://api.foojay.io/disco/v3.0/ids/test") == 0);
+    CHECK(strcmp(version, "17.0.15+6") == 0);
+    CHECK(jvman_download_source_parse_catalog(
+              foojay, json, 21, detail_url, sizeof(detail_url), version,
+              sizeof(version)) != 0);
+    CHECK(snprintf(
+              json, sizeof(json),
+              "{\"result\":[{\"checksum\":\"%s\","
+              "\"checksum_type\":\"sha256\",\"direct_download_uri\":"
+              "\"https://example.test/jdk.zip\"}]}", checksum) <
+          (int)sizeof(json));
+    CHECK(jvman_download_source_parse_package(
+              foojay, json, parsed_url, sizeof(parsed_url),
+              parsed_checksum, sizeof(parsed_checksum)) == 0);
+    CHECK(strcmp(parsed_checksum, checksum) == 0);
+    CHECK(snprintf(
+              json, sizeof(json),
+              "{\"result\":[{\"checksum\":\"%s\","
+              "\"checksum_type\":\"sha512\",\"direct_download_uri\":"
+              "\"https://example.test/jdk.zip\"}]}", checksum) <
+          (int)sizeof(json));
+    CHECK(jvman_download_source_parse_package(
+              foojay, json, parsed_url, sizeof(parsed_url),
+              parsed_checksum, sizeof(parsed_checksum)) != 0);
+}
+
+static void test_foojay_json_boundaries(void) {
+    static const char checksum[] =
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    const JvmanDownloadSource *foojay =
+        jvman_download_source_find("foojay");
+    char detail_url[256];
+    char version[128];
+    char parsed_url[256];
+    char parsed_checksum[65];
+    char oversized_url[2050];
+    char json[4096];
+
+    CHECK(foojay != NULL);
+
+    /* Nested decoys are ignored; the first complete direct package wins. */
+    CHECK(jvman_download_source_parse_catalog(
+              foojay,
+              "{\"message\":\"two packages\",\"result\":["
+              "{\"java_version\":\"17.0.18+8\",\"links\":{\"decoy\":{"
+              "\"pkg_info_uri\":\"https://attacker.invalid/catalog\"}}},"
+              "{\"java_version\":\"17.0.19+10\",\"links\":{"
+              "\"pkg_info_uri\":\"https:\\/\\/api.foojay.io\\/disco\\/v3.0\\/ids\\/good\"}}]}",
+              17, detail_url, sizeof(detail_url), version,
+              sizeof(version)) == 0);
+    CHECK(strcmp(detail_url,
+                 "https://api.foojay.io/disco/v3.0/ids/good") == 0);
+    CHECK(strcmp(version, "17.0.19+10") == 0);
+
+    CHECK(jvman_download_source_parse_catalog(
+              foojay,
+              "{\"metadata\":{\"result\":[{\"java_version\":\"17.0.19+10\","
+              "\"links\":{\"pkg_info_uri\":\"https://attacker.invalid/id\"}}]},"
+              "\"result\":[]}",
+              17, detail_url, sizeof(detail_url), version,
+              sizeof(version)) != 0);
+    CHECK(detail_url[0] == '\0' && version[0] == '\0');
+
+    /* Fields from separate result elements must never be combined. */
+    CHECK(jvman_download_source_parse_catalog(
+              foojay,
+              "{\"result\":[{\"java_version\":\"17.0.19+10\"},"
+              "{\"links\":{\"pkg_info_uri\":\"https://api.foojay.io/id\"}}]}",
+              17, detail_url, sizeof(detail_url), version,
+              sizeof(version)) != 0);
+    CHECK(jvman_download_source_parse_catalog(
+              foojay,
+              "{\"result\":[{\"java_version\":\"17.0.19+10\","
+              "\"links\":{}}]}",
+              17, detail_url, sizeof(detail_url), version,
+              sizeof(version)) != 0);
+    CHECK(jvman_download_source_parse_catalog(
+              foojay,
+              "{\"result\":[{\"java_version\":\"21.0.7+6\",\"links\":{"
+              "\"pkg_info_uri\":\"https://api.foojay.io/id\"}}]}",
+              17, detail_url, sizeof(detail_url), version,
+              sizeof(version)) != 0);
+    CHECK(jvman_download_source_parse_catalog(
+              foojay,
+              "{\"result\":[{\"java_version\":\"17.0.19+10\",\"links\":{"
+              "\"pkg_info_uri\":\"http://api.foojay.io/id\"}}]}",
+              17, detail_url, sizeof(detail_url), version,
+              sizeof(version)) != 0);
+
+    CHECK(snprintf(
+              json, sizeof(json),
+              "{\"result\":[{\"checksum_type\":\"sha256\",\"metadata\":{"
+              "\"checksum\":\"%s\",\"direct_download_uri\":"
+              "\"https://attacker.invalid/jdk.zip\"}},"
+              "{\"checksum_type\":\"sha256\",\"checksum\":\"%s\","
+              "\"direct_download_uri\":\"https://example.test/good.zip\"}]}",
+              checksum, checksum) < (int)sizeof(json));
+    CHECK(jvman_download_source_parse_package(
+              foojay, json, parsed_url, sizeof(parsed_url),
+              parsed_checksum, sizeof(parsed_checksum)) == 0);
+    CHECK(strcmp(parsed_url, "https://example.test/good.zip") == 0);
+    CHECK(strcmp(parsed_checksum, checksum) == 0);
+
+    CHECK(snprintf(
+              json, sizeof(json),
+              "{\"result\":[{\"checksum_type\":\"sha256\","
+              "\"direct_download_uri\":\"https://example.test/first.zip\"},"
+              "{\"checksum\":\"%s\"}]}", checksum) < (int)sizeof(json));
+    CHECK(jvman_download_source_parse_package(
+              foojay, json, parsed_url, sizeof(parsed_url),
+              parsed_checksum, sizeof(parsed_checksum)) != 0);
+    CHECK(parsed_url[0] == '\0' && parsed_checksum[0] == '\0');
+
+    CHECK(jvman_download_source_parse_package(
+              foojay,
+              "{\"result\":[{\"checksum_type\":\"sha256\","
+              "\"direct_download_uri\":\"https://example.test/missing.zip\"}]}",
+              parsed_url, sizeof(parsed_url), parsed_checksum,
+              sizeof(parsed_checksum)) != 0);
+    CHECK(snprintf(
+              json, sizeof(json),
+              "{\"result\":[{\"checksum_type\":\"sha256\","
+              "\"checksum\":\"%s\",\"direct_download_uri\":"
+              "\"http://example.test/jdk.zip\"}]}", checksum) <
+          (int)sizeof(json));
+    CHECK(jvman_download_source_parse_package(
+              foojay, json, parsed_url, sizeof(parsed_url),
+              parsed_checksum, sizeof(parsed_checksum)) != 0);
+
+    memset(oversized_url, 'a', sizeof(oversized_url));
+    memcpy(oversized_url, "https://", 8);
+    oversized_url[sizeof(oversized_url) - 1] = '\0';
+    CHECK(snprintf(
+              json, sizeof(json),
+              "{\"result\":[{\"checksum_type\":\"sha256\","
+              "\"checksum\":\"%s\",\"direct_download_uri\":\"%s\"}]}",
+              checksum, oversized_url) < (int)sizeof(json));
+    CHECK(jvman_download_source_parse_package(
+              foojay, json, parsed_url, sizeof(parsed_url),
+              parsed_checksum, sizeof(parsed_checksum)) != 0);
 }
 
 static void test_sha256(void) {
@@ -421,6 +623,8 @@ int main(void) {
     test_names();
     test_paths();
     test_json();
+    test_download_sources();
+    test_foojay_json_boundaries();
     test_sha256();
     test_release_parsing();
     test_discovery_normalization();

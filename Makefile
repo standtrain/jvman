@@ -16,10 +16,10 @@ RESOURCE_OBJ :=
 endif
 
 TARGET := jvman$(EXEEXT)
-SOURCES := src/main.c src/manager.c src/discovery.c src/platform.c src/util.c src/sha256.c
-HEADERS := src/common.h src/manager.h src/discovery.h src/platform.h src/util.h src/sha256.h
+SOURCES := src/main.c src/manager.c src/download_source.c src/discovery.c src/platform.c src/util.c src/sha256.c
+HEADERS := src/common.h src/manager.h src/download_source.h src/discovery.h src/platform.h src/util.h src/sha256.h
 TEST_TARGET := test_unit$(EXEEXT)
-TEST_SOURCES := tests/test_unit.c src/discovery.c src/platform.c src/util.c src/sha256.c
+TEST_SOURCES := tests/test_unit.c src/download_source.c src/discovery.c src/platform.c src/util.c src/sha256.c
 
 # The native setup bundle is intentionally a Windows-only target.  It consists
 # of a small Win32 setup stub with the jvman executable appended as a verified
@@ -72,7 +72,7 @@ $(SETUP_TARGET): $(TARGET) $(SETUP_STUB) $(PACK_SETUP)
 	./$(PACK_SETUP) $(SETUP_STUB) $(TARGET) $@
 endif
 
-$(TEST_TARGET): $(TEST_SOURCES) src/common.h src/util.h src/sha256.h
+$(TEST_TARGET): $(TEST_SOURCES) src/common.h src/download_source.h src/util.h src/sha256.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(TEST_SOURCES) $(LDFLAGS) $(LDLIBS) -o $@
 
 ifeq ($(OS),Windows_NT)

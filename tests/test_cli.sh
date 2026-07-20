@@ -76,6 +76,23 @@ if "$binary" discover --unknown >/dev/null 2>&1; then
     exit 1
 fi
 
+test "$("$binary" source)" = adoptium
+if "$binary" source unknown >/dev/null 2>&1; then
+    echo 'source accepted an unknown provider' >&2
+    exit 1
+fi
+"$binary" source foojay
+test "$("$binary" source)" = foojay
+grep -Fx foojay "$state_root/source.conf" >/dev/null
+"$binary" source --list | grep -E '^\* foojay' >/dev/null
+if "$binary" install 21 --source unknown >/dev/null 2>&1; then
+    echo 'install accepted an unknown source' >&2
+    exit 1
+fi
+"$binary" source --reset
+test "$("$binary" source)" = adoptium
+test ! -e "$state_root/source.conf"
+
 "$binary" add "$discovery_name" "$name_conflict"
 "$binary" add manual-discovered "$discovered_a"
 registered_preview=$("$binary" discover)
@@ -134,5 +151,9 @@ tar -cf "$archive" -C "$archive_source" fake-jdk
 "$binary" install packed --archive "$archive"
 test -f "$archive"
 test -f "$("$binary" which packed)/bin/javac"
+if "$binary" install another --archive "$archive" --source foojay >/dev/null 2>&1; then
+    echo 'local archive install accepted --source' >&2
+    exit 1
+fi
 "$binary" remove packed
 echo "All CLI integration tests passed."

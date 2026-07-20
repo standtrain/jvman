@@ -174,6 +174,27 @@ try {
     }
     Invoke-JvmanExpectFailure discover --unknown
 
+    if ((Invoke-Jvman source).Trim() -ne 'adoptium') {
+        throw 'default download source is not adoptium'
+    }
+    Invoke-JvmanExpectFailure source unknown
+    Invoke-Jvman source foojay | Out-Null
+    if ((Invoke-Jvman source).Trim() -ne 'foojay' -or
+        (Get-Content -LiteralPath (Join-Path $stateRoot 'source.conf') -Raw).Trim() -ne 'foojay') {
+        throw 'download source selection was not persisted'
+    }
+    $sourceList = (Invoke-Jvman source --list) -join "`n"
+    if ($sourceList -notmatch '(?m)^\* foojay' -or
+        $sourceList -notmatch '(?m)^  adoptium') {
+        throw 'download source list did not mark the active source'
+    }
+    Invoke-JvmanExpectFailure install 21 --source unknown
+    Invoke-Jvman source --reset | Out-Null
+    if ((Invoke-Jvman source).Trim() -ne 'adoptium' -or
+        (Test-Path -LiteralPath (Join-Path $stateRoot 'source.conf'))) {
+        throw 'download source reset did not restore the default'
+    }
+
     Invoke-Jvman add $discoveryName $nameConflict | Out-Null
     Invoke-Jvman add manual-discovered $discoveredA | Out-Null
     $manualConfig = Get-RegistrationContent 'manual-discovered'
@@ -344,6 +365,7 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'could not create local test archive' }
     $archiveHash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
     Invoke-JvmanExpectFailure install packed --archive $archive --sha256 ('0' * 64)
+    Invoke-JvmanExpectFailure install packed --archive $archive --source foojay
     $untrustedCwd = Join-Path $testRoot 'untrusted cwd'
     New-Item -ItemType Directory -Force -Path $untrustedCwd | Out-Null
     New-Item -ItemType File -Force -Path (Join-Path $untrustedCwd 'tar.exe') | Out-Null

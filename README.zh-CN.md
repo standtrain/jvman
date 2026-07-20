@@ -10,8 +10,8 @@
 
 ## 当前功能
 
-- 从 Adoptium API 按 Java 主版本下载 Temurin JDK。
-- 使用 Adoptium 元数据中的 SHA-256 校验远程安装包。
+- 通过 Adoptium 或 Foojay API 按 Java 主版本下载 Temurin JDK。
+- 使用所选下载源元数据中的 SHA-256 校验远程安装包。
 - 从本地归档离线安装，可额外固定 SHA-256。
 - 注册已有 JDK，不复制原目录。
 - 自动发现已安装的 Java，并可批量注册有效 JDK。
@@ -84,6 +84,10 @@ jvman-setup.exe /HELP
 # 下载当前平台最新的 Temurin 21
 jvman install 21
 
+# 持久切换下载源，也可仅覆盖单次安装
+jvman source foojay
+jvman install 17 --source adoptium
+
 # 也可以注册机器上已经存在的 JDK
 jvman add oracle-23 'C:\Program Files\Java\jdk-23'
 
@@ -112,8 +116,9 @@ jvman init powershell | Invoke-Expression
 ## 命令
 
 ```text
-jvman install <主版本> [--name <名称>] [--sha256 <固定校验值>]
+jvman install <主版本> [--name <名称>] [--sha256 <固定校验值>] [--source <下载源>]
 jvman install <名称> --archive <本地文件> [--sha256 <校验值>]
+jvman source [--list|--reset|<下载源>]
 jvman add <名称> <JDK_HOME>
 jvman discover [--register]
 jvman use <名称>
@@ -128,6 +133,11 @@ jvman home
 ```
 
 别名：`ls` 等同于 `list`，`default` 等同于 `use`，`uninstall` 等同于 `remove`。
+
+`jvman source` 显示当前下载源，`jvman source --list` 列出内置的
+`adoptium` 和 `foojay`，`jvman source <下载源>` 持久保存选择，`--reset`
+恢复 Adoptium。安装命令的 `--source` 只覆盖本次下载。下载源名称仅接受内置白名单，
+元数据和安装包地址必须使用 HTTPS，且所有远程安装包都必须提供并通过 SHA-256 校验。
 
 常用示例：
 
@@ -178,6 +188,7 @@ jvman/
   jdks/              由 jvman 管理的 JDK
   staging/           尚未提交的安装内容
   versions/*.conf    名称到 JAVA_HOME 的注册记录
+  source.conf        当前远程下载源
   current            指向当前 JDK 的 junction/symlink
   current.version    当前注册名称
   state.lock         跨进程状态锁
@@ -197,10 +208,10 @@ jvman/
 
 ## 当前边界
 
-`0.2.0` 仍只使用 Temurin 作为远程安装供应商，并且远程安装只接受 Java 主版本。本地发现可以识别常见 JDK 厂商，但多供应商下载目录、托管 JRE、EA/GraalVM、复杂版本范围、项目级 `.java-version`、自更新和机器级环境变量修改暂不实现。
+`0.2.0` 通过 Adoptium 或 Foojay 目录安装 Temurin，远程安装只接受 Java 主版本。本地发现可以识别常见 JDK 厂商，但远程选择其他 JDK 供应商、托管 JRE、EA/GraalVM、复杂版本范围、项目级 `.java-version`、自更新和机器级环境变量修改暂不实现。
 
-远程包必须同时匹配 Adoptium API 返回的 SHA-256；用户传入 `--sha256` 时还会再校验用户固定值。该校验可以发现下载损坏或包不匹配，但不等价于独立的发布签名验证。
+远程包必须匹配所选下载源返回的 SHA-256；用户传入 `--sha256` 时还会再校验用户固定值。该校验可以发现下载损坏或包不匹配，但不等价于独立的发布签名验证。
 
-解压依赖操作系统自带的 `tar`。远程归档来自内置 Adoptium HTTPS 供应商并经过校验；本地归档默认视为可信输入，传入 `--sha256` 可固定其内容。安装被强制终止时可能遗留 cache/staging 临时文件，可在确认没有安装进程运行后手动清理。
+解压依赖操作系统自带的 `tar`。远程归档通过内置 HTTPS 下载源获取并经过校验；本地归档默认视为可信输入，传入 `--sha256` 可固定其内容。安装被强制终止时可能遗留 cache/staging 临时文件，可在确认没有安装进程运行后手动清理。
 
 Windows 构建面向 1903 及以上版本，并嵌入 UTF-8 active-code-page manifest，因此中文、emoji、空格路径可以贯穿命令行、JDK 注册和 junction 操作。

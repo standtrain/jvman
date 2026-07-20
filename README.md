@@ -20,8 +20,8 @@ after an explicit choice.
 
 ## Features
 
-- Download Temurin JDKs by Java major version from the Adoptium API.
-- Verify remote archives with the SHA-256 published in Adoptium metadata.
+- Download Temurin JDKs by Java major version through the Adoptium or Foojay API.
+- Verify remote archives with the SHA-256 published by the selected source.
 - Install from a local archive for offline use.
 - Register an existing JDK without copying it.
 - Discover installed Java runtimes and optionally batch-register valid JDKs.
@@ -126,6 +126,10 @@ only files and environment entries owned by this installation. Registered JDKs,
 # Download the latest Temurin build for a Java major version.
 jvman install 21
 
+# Persistently switch the metadata/download source, or override it once.
+jvman source foojay
+jvman install 17 --source adoptium
+
 # Or register a JDK that already exists.
 jvman add oracle-23 'C:\Program Files\Java\jdk-23'
 
@@ -157,8 +161,9 @@ junction and the next Java process sees the new JDK immediately.
 ## Commands
 
 ```text
-jvman install <major> [--name <name>] [--sha256 <hex>]
+jvman install <major> [--name <name>] [--sha256 <hex>] [--source <name>]
 jvman install <name> --archive <file> [--sha256 <hex>]
+jvman source [--list|--reset|<name>]
 jvman add <name> <jdk-home>
 jvman discover [--register]
 jvman use <name>
@@ -173,6 +178,13 @@ jvman home
 ```
 
 Aliases: `ls` for `list`, `default` for `use`, and `uninstall` for `remove`.
+
+`jvman source` prints the active source. `jvman source --list` lists the
+built-in `adoptium` and `foojay` sources, `jvman source <name>` persists a
+selection, and `--reset` restores Adoptium. An install-level `--source` only
+overrides that invocation. Source names are restricted to the built-in list;
+metadata and package URLs must use HTTPS, and every remote package must include
+and match a SHA-256 checksum.
 
 Examples:
 
@@ -242,6 +254,7 @@ jvman/
   jdks/              JDKs owned by jvman
   staging/           incomplete installs, never activated
   versions/*.conf    registered name -> JAVA_HOME records
+  source.conf        selected remote download source
   current            junction/symlink to the selected JDK
   current.version    selected registration name
   state.lock         cross-process mutation lock
@@ -270,9 +283,9 @@ No source code is copied from those projects.
 
 ## Current Scope
 
-Version `0.2.0` uses Temurin as its only remote-install provider and accepts a
-Java major version for remote installs. Local discovery recognizes common JDK
-vendors, but multi-vendor download catalogs, managed JREs, EA builds, semantic
+Version `0.2.0` installs Temurin through either the Adoptium or Foojay catalog
+and accepts a Java major version for remote installs. Local discovery recognizes
+common JDK vendors, but multi-vendor JDK selection, managed JREs, EA builds, semantic
 version ranges, project `.java-version` files, self-update, and machine-wide
 environment changes are intentionally deferred.
 
@@ -281,9 +294,9 @@ UTF-8 code-page manifest allows non-ASCII data and JDK paths without requiring
 wide-character command-line wrappers.
 
 Remote archives are accepted only after matching the SHA-256 returned by the
-Adoptium API. This detects corruption and unexpected content from a mismatched
+selected source. This detects corruption and unexpected content from a mismatched
 download; it is not a replacement for independent signature verification.
 
 Archive extraction uses the operating system's `tar` implementation. The URL
-comes from the built-in Adoptium provider and is checksum-verified. Local
+comes from a built-in HTTPS source and is checksum-verified. Local
 archives are trusted input unless `--sha256` is supplied.

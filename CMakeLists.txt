@@ -8,6 +8,7 @@ set(CMAKE_C_EXTENSIONS OFF)
 add_executable(jvman
     src/main.c
     src/manager.c
+    src/download_source.c
     src/discovery.c
     src/platform.c
     src/util.c
@@ -103,6 +104,7 @@ include(CTest)
 if(BUILD_TESTING)
     add_executable(test_unit
         tests/test_unit.c
+        src/download_source.c
         src/discovery.c
         src/platform.c
         src/util.c

@@ -11,6 +11,7 @@ typedef struct JvmanContext {
     char staging[JVMAN_PATH_MAX];
     char current_link[JVMAN_PATH_MAX];
     char current_state[JVMAN_PATH_MAX];
+    char download_source[JVMAN_PATH_MAX];
     char lock_file[JVMAN_PATH_MAX];
 } JvmanContext;
 

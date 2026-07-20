@@ -1,5 +1,6 @@
 #include "manager.h"
 
+#include "download_source.h"
 #include "discovery.h"
 #include "platform.h"
 #include "sha256.h"
@@ -9,6 +10,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#define JVMAN_METADATA_LIMIT (1024u * 1024u)
+#define JVMAN_JDK_ARCHIVE_LIMIT ((size_t)1024u * 1024u * 1024u)
 
 static int print_error(const char *message) {
     fprintf(stderr, "jvman: %s\n", message);
@@ -38,6 +42,8 @@ int jvman_context_init(JvmanContext *context) {
                         "current") != 0 ||
         jvman_path_join(context->current_state, sizeof(context->current_state), context->root,
                         "current.version") != 0 ||
+        jvman_path_join(context->download_source, sizeof(context->download_source),
+                        context->root, "source.conf") != 0 ||
         jvman_path_join(context->lock_file, sizeof(context->lock_file), context->root,
                         "state.lock") != 0) {
         return -1;
@@ -864,110 +870,204 @@ static int valid_sha256_text(const char *text) {
     return 1;
 }
 
-static int download_metadata(int major, const char *metadata_path,
-                             char *download_url, size_t url_size,
-                             char *checksum, size_t checksum_size,
-                             char *exact_version, size_t version_size) {
-    char url[1024];
-    char *arguments[26];
-    char *json;
-    int exit_code;
-#if defined(_WIN32)
-    char downloader_name[] = "curl.exe";
-#else
-    char downloader_name[] = "curl";
-#endif
-    char downloader[JVMAN_PATH_MAX];
-    if (snprintf(url, sizeof(url),
-                 "https://api.adoptium.net/v3/assets/latest/%d/hotspot?architecture=%s&heap_size=normal&image_type=jdk&jvm_impl=hotspot&os=%s&page=0&page_size=1&project=jdk&sort_method=DEFAULT&sort_order=DESC&vendor=eclipse",
-                 major, platform_arch_name(), platform_os_name()) >= (int)sizeof(url)) return -1;
-    if (platform_find_trusted_executable(downloader_name, downloader,
-                                         sizeof(downloader)) != 0) return -1;
-    arguments[0] = downloader;
-    arguments[1] = "--fail";
-    arguments[2] = "--location";
-    arguments[3] = "--silent";
-    arguments[4] = "--show-error";
-    arguments[5] = "--retry";
-    arguments[6] = "2";
-    arguments[7] = "--header";
-    arguments[8] = "User-Agent: jvman/" JVMAN_VERSION;
-    arguments[9] = "--connect-timeout";
-    arguments[10] = "30";
-    arguments[11] = "--proto";
-    arguments[12] = "=https";
-    arguments[13] = "--proto-redir";
-    arguments[14] = "=https";
-    arguments[15] = "--output";
-    arguments[16] = (char *)metadata_path;
-    arguments[17] = "--max-time";
-    arguments[18] = "60";
-    arguments[19] = "--speed-limit";
-    arguments[20] = "1024";
-    arguments[21] = "--speed-time";
-    arguments[22] = "30";
-    arguments[23] = url;
-    arguments[24] = NULL;
-    exit_code = platform_spawn_wait(arguments);
-    if (exit_code != 0) return -1;
-    json = jvman_read_all(metadata_path, NULL);
-    if (!json) return -1;
-    if (jvman_json_string_field(json, "\"package\"", "link", download_url, url_size) != 0 ||
-        jvman_json_string_field(json, "\"package\"", "checksum", checksum, checksum_size) != 0) {
-        free(json);
+static char *read_file_bounded(const char *path, size_t limit) {
+    FILE *file;
+    long raw_size;
+    size_t size;
+    char *data;
+    int trailing;
+    if (!path || limit == 0 || !(file = fopen(path, "rb"))) return NULL;
+    if (fseek(file, 0, SEEK_END) != 0 || (raw_size = ftell(file)) < 0 ||
+        (unsigned long)raw_size > (unsigned long)limit ||
+        fseek(file, 0, SEEK_SET) != 0) {
+        fclose(file);
+        return NULL;
+    }
+    size = (size_t)raw_size;
+    data = (char *)malloc(size + 1);
+    if (!data) {
+        fclose(file);
+        return NULL;
+    }
+    if ((size && fread(data, 1, size, file) != size) ||
+        (trailing = fgetc(file)) != EOF || ferror(file)) {
+        free(data);
+        fclose(file);
+        return NULL;
+    }
+    data[size] = '\0';
+    fclose(file);
+    return data;
+}
+
+static int read_download_source(const JvmanContext *context,
+                                const JvmanDownloadSource **source_out) {
+    char *name = NULL;
+    size_t name_size = 0;
+    const JvmanDownloadSource *source;
+    if (!context || !source_out) return -1;
+    if (!platform_path_exists(context->download_source)) {
+        *source_out = jvman_download_source_default();
+        return 0;
+    }
+    if (!platform_is_file(context->download_source) ||
+        !(name = read_file_bounded(context->download_source, 64))) {
         return -1;
     }
-    if (jvman_json_string_field(json, "\"version\"", "openjdk_version",
-                                exact_version, version_size) != 0) {
-        snprintf(exact_version, version_size, "%d", major);
+    name_size = strlen(name);
+    while (name_size && (name[name_size - 1] == '\r' ||
+                         name[name_size - 1] == '\n')) {
+        name[--name_size] = '\0';
     }
-    free(json);
-    if (strncmp(download_url, "https://", 8) != 0 || !valid_sha256_text(checksum)) {
+    if (name_size == 0 || strchr(name, '\r') || strchr(name, '\n')) {
+        free(name);
         return -1;
     }
-    {
-        char *version_end;
-        long resolved_major = strtol(exact_version, &version_end, 10);
-        int legacy_java8 = major == 8 && strncmp(exact_version, "1.8.", 4) == 0;
-        if (!legacy_java8 && (version_end == exact_version || resolved_major != major)) {
-            return -1;
-        }
-    }
+    source = jvman_download_source_find(name);
+    free(name);
+    if (!source) return -1;
+    *source_out = source;
     return 0;
 }
 
-static int download_archive(const char *url, const char *destination) {
-    char *arguments[24];
+static int command_source(const JvmanContext *context, int argc, char **argv) {
+    const JvmanDownloadSource *active;
+    const JvmanDownloadSource *selected;
+    PlatformLock lock;
+    size_t i;
+    int result = 1;
+    if (argc == 2) {
+        if (read_download_source(context, &active) != 0) {
+            return print_error("download source configuration is invalid");
+        }
+        puts(active->name);
+        return 0;
+    }
+    if (argc == 3 && strcmp(argv[2], "--list") == 0) {
+        if (read_download_source(context, &active) != 0) {
+            return print_error("download source configuration is invalid");
+        }
+        for (i = 0; i < jvman_download_source_count(); ++i) {
+            const JvmanDownloadSource *item = jvman_download_source_at(i);
+            printf("%c %-10s %s\n", item == active ? '*' : ' ',
+                   item->name, item->label);
+        }
+        return 0;
+    }
+    if (argc != 3) {
+        return print_error("usage: jvman source [--list|--reset|<name>]");
+    }
+    selected = strcmp(argv[2], "--reset") == 0
+                   ? jvman_download_source_default()
+                   : jvman_download_source_find(argv[2]);
+    if (!selected) return print_error("unknown download source; use `jvman source --list`");
+    if (acquire_lock(context, &lock) != 0) return print_platform_error("cannot lock state");
+    if (strcmp(argv[2], "--reset") == 0) {
+        if (platform_path_exists(context->download_source) &&
+            platform_remove_file(context->download_source) != 0) {
+            print_platform_error("cannot reset download source");
+            goto done;
+        }
+    } else {
+        char content[80];
+        if (snprintf(content, sizeof(content), "%s\n", selected->name) >=
+                (int)sizeof(content) ||
+            platform_write_text_atomic(context->download_source, content) != 0) {
+            print_platform_error("cannot save download source");
+            goto done;
+        }
+    }
+    printf("Download source: %s (%s)\n", selected->name, selected->label);
+    result = 0;
+done:
+    platform_lock_release(&lock);
+    return result;
+}
+
+static int download_file(const char *url, const char *destination,
+                         size_t limit, int show_progress);
+
+static int download_metadata(const JvmanDownloadSource *source, int major,
+                             const char *metadata_path,
+                             char *download_url, size_t url_size,
+                             char *checksum, size_t checksum_size,
+                             char *exact_version, size_t version_size) {
+    char metadata_url[2048];
+    char detail_url[2048];
+    char *json = NULL;
+    int result;
+    if (jvman_download_source_build_metadata_url(
+            source, major, platform_os_name(), platform_arch_name(),
+            platform_archive_extension(), metadata_url,
+            sizeof(metadata_url)) != 0 ||
+        download_file(metadata_url, metadata_path, JVMAN_METADATA_LIMIT, 0) != 0 ||
+        !(json = read_file_bounded(metadata_path, JVMAN_METADATA_LIMIT))) {
+        return -1;
+    }
+    result = jvman_download_source_parse_catalog(
+        source, json, major, detail_url, sizeof(detail_url),
+        exact_version, version_size);
+    if (result == 0 && detail_url[0]) {
+        free(json);
+        json = NULL;
+        if (platform_remove_file(metadata_path) != 0 ||
+            download_file(detail_url, metadata_path,
+                          JVMAN_METADATA_LIMIT, 0) != 0 ||
+            !(json = read_file_bounded(metadata_path,
+                                       JVMAN_METADATA_LIMIT))) {
+            return -1;
+        }
+    }
+    if (result == 0) {
+        result = jvman_download_source_parse_package(
+            source, json, download_url, url_size, checksum, checksum_size);
+    }
+    free(json);
+    return result;
+}
+
+static int download_file(const char *url, const char *destination,
+                         size_t limit, int show_progress) {
+    char *arguments[32];
+    char limit_text[32];
+    int index = 0;
+    int limit_length;
 #if defined(_WIN32)
     char downloader_name[] = "curl.exe";
 #else
     char downloader_name[] = "curl";
 #endif
     char downloader[JVMAN_PATH_MAX];
-    if (platform_find_trusted_executable(downloader_name, downloader,
-                                         sizeof(downloader)) != 0) return -1;
-    arguments[0] = downloader;
-    arguments[1] = "--fail";
-    arguments[2] = "--location";
-    arguments[3] = "--retry";
-    arguments[4] = "2";
-    arguments[5] = "--progress-bar";
-    arguments[6] = "--header";
-    arguments[7] = "User-Agent: jvman/" JVMAN_VERSION;
-    arguments[8] = "--output";
-    arguments[9] = (char *)destination;
-    arguments[10] = "--connect-timeout";
-    arguments[11] = "30";
-    arguments[12] = "--proto";
-    arguments[13] = "=https";
-    arguments[14] = "--proto-redir";
-    arguments[15] = "=https";
-    arguments[16] = "--speed-limit";
-    arguments[17] = "1024";
-    arguments[18] = "--speed-time";
-    arguments[19] = "60";
-    arguments[20] = (char *)url;
-    arguments[21] = NULL;
+    limit_length = snprintf(limit_text, sizeof(limit_text), "%zu", limit);
+    if (!url || strncmp(url, "https://", 8) != 0 || limit == 0 ||
+        limit_length < 0 || limit_length >= (int)sizeof(limit_text) ||
+        platform_find_trusted_executable(downloader_name, downloader,
+                                         sizeof(downloader)) != 0) {
+        return -1;
+    }
+    arguments[index++] = downloader;
+    arguments[index++] = "--fail";
+    arguments[index++] = "--location";
+    arguments[index++] = "--show-error";
+    arguments[index++] = "--retry";
+    arguments[index++] = "2";
+    arguments[index++] = show_progress ? "--progress-bar" : "--silent";
+    arguments[index++] = "--header";
+    arguments[index++] = "User-Agent: jvman/" JVMAN_VERSION;
+    arguments[index++] = "--connect-timeout";
+    arguments[index++] = "30";
+    arguments[index++] = "--max-time";
+    arguments[index++] = show_progress ? "300" : "60";
+    arguments[index++] = "--proto";
+    arguments[index++] = "=https";
+    arguments[index++] = "--proto-redir";
+    arguments[index++] = "=https";
+    arguments[index++] = "--max-filesize";
+    arguments[index++] = limit_text;
+    arguments[index++] = "--output";
+    arguments[index++] = (char *)destination;
+    arguments[index++] = (char *)url;
+    arguments[index] = NULL;
     return platform_spawn_wait(arguments);
 }
 
@@ -986,7 +1086,8 @@ static int extract_archive(const char *archive, const char *destination) {
 
 static int command_install(const JvmanContext *context, const char *version,
                            const char *name_option, const char *archive_option,
-                           const char *checksum_option) {
+                           const char *checksum_option,
+                           const char *source_option) {
     char name[JVMAN_NAME_MAX + 1];
     char metadata[JVMAN_PATH_MAX] = {0};
     char archive[JVMAN_PATH_MAX] = {0};
@@ -1007,6 +1108,7 @@ static int command_install(const JvmanContext *context, const char *version,
     int result = 1;
     PlatformLock lock;
     JvmanRegistration registration;
+    const JvmanDownloadSource *download_source = NULL;
     const char *archive_source = archive;
 
     if (!version || !jvman_valid_name(version)) return print_error("invalid version");
@@ -1025,6 +1127,18 @@ static int command_install(const JvmanContext *context, const char *version,
     }
     if (checksum_option && !valid_sha256_text(checksum_option)) {
         return print_error("--sha256 must contain 64 hexadecimal characters");
+    }
+    if (!remote && source_option) {
+        return print_error("--source is only valid for remote installs");
+    }
+    if (remote) {
+        if (source_option) download_source = jvman_download_source_find(source_option);
+        else if (read_download_source(context, &download_source) != 0) {
+            return print_error("download source configuration is invalid");
+        }
+        if (!download_source) {
+            return print_error("unknown download source; use `jvman source --list`");
+        }
     }
     if (acquire_lock(context, &lock) != 0) return print_platform_error("cannot lock state");
     if (registration_exists(context, name)) {
@@ -1067,15 +1181,15 @@ static int command_install(const JvmanContext *context, const char *version,
         goto cleanup;
     }
     if (remote) {
-        printf("Resolving Temurin %d for %s/%s...\n", major,
-               platform_os_name(), platform_arch_name());
-        if (download_metadata(major, metadata, url, sizeof(url), checksum,
+        printf("Resolving Temurin %d for %s/%s via %s...\n", major,
+               platform_os_name(), platform_arch_name(), download_source->label);
+        if (download_metadata(download_source, major, metadata, url, sizeof(url), checksum,
                               sizeof(checksum), exact_version, sizeof(exact_version)) != 0) {
-            print_error("could not resolve a Temurin package from Adoptium");
+            print_error("could not resolve a Temurin package from the selected source");
             goto cleanup;
         }
         printf("Downloading Temurin %s...\n", exact_version);
-        if (download_archive(url, archive) != 0) {
+        if (download_file(url, archive, JVMAN_JDK_ARCHIVE_LIMIT, 1) != 0) {
             print_error("download failed");
             goto cleanup;
         }
@@ -1158,12 +1272,13 @@ static void print_usage(void) {
     puts("jvman " JVMAN_VERSION " - lightweight Java version manager");
     puts("");
     puts("Usage:");
-    puts("  jvman install <major> [--name <name>] [--sha256 <hex>]");
+    puts("  jvman install <major> [--name <name>] [--sha256 <hex>] [--source <name>]");
     puts("  jvman install <name> --archive <file> [--sha256 <hex>]");
     puts("  jvman add <name> <jdk-home>");
     puts("  jvman use <name>");
     puts("  jvman list");
     puts("  jvman discover [--register]");
+    puts("  jvman source [--list|--reset|<name>]");
     puts("  jvman current");
     puts("  jvman which [name]");
     puts("  jvman remove <name>");
@@ -1177,15 +1292,17 @@ static int parse_install(const JvmanContext *context, int argc, char **argv) {
     const char *name = NULL;
     const char *archive = NULL;
     const char *checksum = NULL;
+    const char *source = NULL;
     int i;
     if (argc < 3) return print_error("install requires a version");
     for (i = 3; i < argc; ++i) {
         if (strcmp(argv[i], "--name") == 0 && i + 1 < argc) name = argv[++i];
         else if (strcmp(argv[i], "--archive") == 0 && i + 1 < argc) archive = argv[++i];
         else if (strcmp(argv[i], "--sha256") == 0 && i + 1 < argc) checksum = argv[++i];
+        else if (strcmp(argv[i], "--source") == 0 && i + 1 < argc) source = argv[++i];
         else return print_error("unknown or incomplete install option");
     }
-    return command_install(context, argv[2], name, archive, checksum);
+    return command_install(context, argv[2], name, archive, checksum, source);
 }
 
 int jvman_run(JvmanContext *context, int argc, char **argv) {
@@ -1205,6 +1322,7 @@ int jvman_run(JvmanContext *context, int argc, char **argv) {
     }
     if (strcmp(command, "home") == 0) { puts(context->root); return 0; }
     if (strcmp(command, "install") == 0) return parse_install(context, argc, argv);
+    if (strcmp(command, "source") == 0) return command_source(context, argc, argv);
     if (strcmp(command, "add") == 0)
         return argc == 4 ? command_add(context, argv[2], argv[3]) :
                print_error("usage: jvman add <name> <jdk-home>");

@@ -601,7 +601,15 @@ int platform_write_text_atomic(const char *path, const char *text) {
         platform_set_error("temporary file path is too long");
         return -1;
     }
+#if defined(_WIN32)
     file = fopen(temporary, "wb");
+#else
+    {
+        int descriptor = open(temporary, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+        file = descriptor >= 0 ? fdopen(descriptor, "wb") : NULL;
+        if (!file && descriptor >= 0) close(descriptor);
+    }
+#endif
     if (!file) {
         platform_set_error("cannot write '%s': %s", temporary, strerror(errno));
         return -1;
