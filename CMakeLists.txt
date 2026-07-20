@@ -10,6 +10,7 @@ add_executable(jvman
     src/manager.c
     src/download_source.c
     src/discovery.c
+    src/update.c
     src/platform.c
     src/util.c
     src/sha256.c
@@ -40,6 +41,7 @@ if(WIN32)
         installer/files.c
         installer/pathlist.c
         installer/package.c
+        installer/lang.c
         src/sha256.c
     )
     add_executable(jvman_setup_stub WIN32
@@ -118,11 +120,79 @@ if(BUILD_TESTING)
     endif()
     if(WIN32)
         target_compile_definitions(test_unit PRIVATE _WIN32_WINNT=0x0601)
-        target_link_libraries(test_unit PRIVATE advapi32)
+        target_link_libraries(test_unit PRIVATE advapi32 winhttp shell32)
     else()
         target_compile_definitions(test_unit PRIVATE _POSIX_C_SOURCE=200809L _XOPEN_SOURCE=700)
     endif()
     add_test(NAME unit COMMAND test_unit)
+
+    add_executable(test_update
+        tests/test_update.c
+        src/update.c
+        src/platform.c
+        src/util.c
+        src/sha256.c
+    )
+    target_include_directories(test_update PRIVATE src)
+    if(MSVC)
+        target_compile_options(test_update PRIVATE /W4)
+    else()
+        target_compile_options(test_update PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+    if(WIN32)
+        target_compile_definitions(test_update PRIVATE _WIN32_WINNT=0x0601)
+        target_link_libraries(test_update PRIVATE advapi32 winhttp shell32)
+    else()
+        target_compile_definitions(test_update PRIVATE
+            _POSIX_C_SOURCE=200809L _XOPEN_SOURCE=700)
+    endif()
+    add_test(NAME update_unit COMMAND test_update)
+
+    add_executable(test_update_flow
+        tests/test_update_flow.c
+        src/update.c
+        src/util.c
+    )
+    target_include_directories(test_update_flow PRIVATE src)
+    if(MSVC)
+        target_compile_options(test_update_flow PRIVATE /W4)
+    else()
+        target_compile_options(test_update_flow PRIVATE
+            -Wall -Wextra -Wpedantic)
+    endif()
+    add_test(NAME update_flow COMMAND test_update_flow)
+
+    add_executable(test_update_helper
+        tests/test_update_helper.c
+        src/platform.c
+        src/util.c
+        src/sha256.c
+    )
+    target_include_directories(test_update_helper PRIVATE src)
+    if(MSVC)
+        target_compile_options(test_update_helper PRIVATE /W4)
+    else()
+        target_compile_options(test_update_helper PRIVATE
+            -Wall -Wextra -Wpedantic)
+    endif()
+    if(WIN32)
+        target_compile_definitions(test_update_helper PRIVATE
+            _WIN32_WINNT=0x0601)
+        target_link_libraries(test_update_helper PRIVATE
+            advapi32 winhttp shell32)
+        add_test(NAME update_helper
+            COMMAND powershell.exe -NoProfile -ExecutionPolicy Bypass
+                    -File ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_update_helper.ps1
+                    -Helper $<TARGET_FILE:test_update_helper>)
+    else()
+        target_compile_definitions(test_update_helper PRIVATE
+            _POSIX_C_SOURCE=200809L _XOPEN_SOURCE=700)
+        add_test(NAME update_helper
+            COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_update_helper.sh
+                    $<TARGET_FILE:test_update_helper>)
+    endif()
+    set_tests_properties(update_helper PROPERTIES TIMEOUT 60)
+
     if(WIN32)
         add_test(NAME cli
             COMMAND powershell.exe -NoProfile -ExecutionPolicy Bypass
@@ -161,6 +231,20 @@ if(BUILD_TESTING)
         endif()
         add_test(NAME installer_pathlist COMMAND test_installer_pathlist)
 
+        add_executable(test_installer_lang
+            tests/test_lang.c
+            installer/lang.c
+        )
+        target_include_directories(test_installer_lang PRIVATE installer)
+        target_compile_definitions(test_installer_lang PRIVATE _WIN32_WINNT=0x0601)
+        if(MSVC)
+            target_compile_options(test_installer_lang PRIVATE /W4 /utf-8)
+        else()
+            target_compile_options(test_installer_lang PRIVATE -Wall -Wextra -Wpedantic)
+        endif()
+        target_link_libraries(test_installer_lang PRIVATE user32)
+        add_test(NAME installer_lang COMMAND test_installer_lang)
+
         if(NOT CMAKE_CROSSCOMPILING)
             add_test(NAME installer
                 COMMAND powershell.exe -NoProfile -ExecutionPolicy Bypass
@@ -179,7 +263,7 @@ if(BUILD_TESTING)
 endif()
 
 if(WIN32)
-    target_link_libraries(jvman PRIVATE advapi32)
+    target_link_libraries(jvman PRIVATE advapi32 winhttp shell32)
 endif()
 
 install(TARGETS jvman RUNTIME DESTINATION bin)

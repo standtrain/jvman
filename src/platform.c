@@ -1,17 +1,22 @@
 #include "platform.h"
 
+#include "sha256.h"
 #include "util.h"
 
+#include <ctype.h>
 #include <errno.h>
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <shellapi.h>
+#include <winhttp.h>
 #include <winioctl.h>
 #include <direct.h>
 #include <fcntl.h>
@@ -19,15 +24,28 @@
 #include <process.h>
 #include <sys/stat.h>
 #include <wchar.h>
+
+/* Windows SDK headers hide these names behind a newer target macro. */
+typedef struct JvmanFileDispositionInfoEx {
+    DWORD flags;
+} JvmanFileDispositionInfoEx;
+#define JVMAN_FILE_DISPOSITION_INFO_EX_CLASS ((FILE_INFO_BY_HANDLE_CLASS)21)
+#define JVMAN_FILE_DISPOSITION_FLAG_DELETE 0x00000001u
+#define JVMAN_FILE_DISPOSITION_FLAG_POSIX 0x00000002u
+#define JVMAN_FILE_DISPOSITION_FLAG_IGNORE_READONLY 0x00000010u
 #else
 #include <dirent.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <signal.h>
 #include <sys/file.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#if defined(__APPLE__)
+#include <mach-o/dyld.h>
+#endif
 #endif
 
 static char platform_error_buffer[512];
@@ -81,6 +99,53 @@ static int platform_wide_to_utf8(const WCHAR *wide, char **utf8_out) {
         return -1;
     }
     *utf8_out = utf8;
+    return 0;
+}
+
+static int platform_utf8_to_wide(const char *utf8, WCHAR **wide_out) {
+    int required;
+    WCHAR *wide;
+    if (!utf8 || !wide_out) {
+        platform_set_error("invalid UTF-8 conversion input");
+        return -1;
+    }
+    required = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, utf8, -1,
+                                   NULL, 0);
+    if (required <= 0 || (size_t)required > JVMAN_PATH_MAX) {
+        if (required <= 0) platform_set_windows_error("cannot convert UTF-8 path");
+        else platform_set_error("UTF-8 path is too long");
+        return -1;
+    }
+    wide = (WCHAR *)malloc((size_t)required * sizeof(*wide));
+    if (!wide) {
+        platform_set_error("out of memory converting UTF-8 path");
+        return -1;
+    }
+    if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, utf8, -1,
+                            wide, required) != required) {
+        free(wide);
+        platform_set_windows_error("cannot convert UTF-8 path");
+        return -1;
+    }
+    *wide_out = wide;
+    return 0;
+}
+
+static int platform_copy_wide_to_utf8(const WCHAR *wide, char *out,
+                                      size_t out_size) {
+    char *utf8 = NULL;
+    size_t length;
+    if (!out || out_size == 0 || platform_wide_to_utf8(wide, &utf8) != 0) {
+        return -1;
+    }
+    length = strlen(utf8);
+    if (length + 1u > out_size) {
+        free(utf8);
+        platform_set_error("converted Windows path is too long");
+        return -1;
+    }
+    memcpy(out, utf8, length + 1u);
+    free(utf8);
     return 0;
 }
 
@@ -439,11 +504,26 @@ int platform_mkdirs(const char *path) {
 }
 
 int platform_remove_file(const char *path) {
-    if (!platform_path_exists(path)) return 0;
+    if (!path) return -1;
 #if defined(_WIN32)
-    if (DeleteFileA(path)) return 0;
+    WCHAR *wide = NULL;
+    DWORD attributes;
+    if (platform_utf8_to_wide(path, &wide) != 0) return -1;
+    attributes = GetFileAttributesW(wide);
+    if (attributes == INVALID_FILE_ATTRIBUTES &&
+        (GetLastError() == ERROR_FILE_NOT_FOUND ||
+         GetLastError() == ERROR_PATH_NOT_FOUND)) {
+        free(wide);
+        return 0;
+    }
+    if (DeleteFileW(wide)) {
+        free(wide);
+        return 0;
+    }
+    free(wide);
     platform_set_windows_error("cannot delete file");
 #else
+    if (!platform_path_exists(path)) return 0;
     if (unlink(path) == 0 || errno == ENOENT) return 0;
     platform_set_error("cannot delete file '%s': %s", path, strerror(errno));
 #endif
@@ -1013,52 +1093,15 @@ static int windows_resolve_command(const char *name, char *out, size_t out_size)
     return -1;
 }
 
-static int windows_directory_is_absolute(const char *path) {
-    return path && ((isalpha((unsigned char)path[0]) && path[1] == ':' &&
-                     (path[2] == '\\' || path[2] == '/')) ||
-                    (path[0] == '\\' && path[1] == '\\'));
-}
-
 static int windows_resolve_trusted_command(const char *name, char *out, size_t out_size) {
     char directory[JVMAN_PATH_MAX];
     char candidate[JVMAN_PATH_MAX];
     UINT system_length;
-    const char *path;
-    const char *cursor;
-    if (!name || !*name) return -1;
-    if (windows_has_path_component(name)) {
-        if (!windows_directory_is_absolute(name)) return -1;
-        return windows_try_pathext_candidate(name, out, out_size);
-    }
+    if (!name || !*name || windows_has_path_component(name)) return -1;
     system_length = GetSystemDirectoryA(directory, (UINT)sizeof(directory));
     if (system_length > 0 && system_length < sizeof(directory) &&
         jvman_path_join(candidate, sizeof(candidate), directory, name) == 0 &&
         windows_try_pathext_candidate(candidate, out, out_size) == 0) return 0;
-    path = getenv("PATH");
-    cursor = path;
-    while (cursor && *cursor) {
-        const char *end = strchr(cursor, ';');
-        size_t length = end ? (size_t)(end - cursor) : strlen(cursor);
-        char expanded[JVMAN_PATH_MAX];
-        if (length > 0 && length < sizeof(directory)) {
-            memcpy(directory, cursor, length);
-            directory[length] = '\0';
-            if (length >= 2 && directory[0] == '"' && directory[length - 1] == '"') {
-                memmove(directory, directory + 1, length - 2);
-                directory[length - 2] = '\0';
-            }
-            {
-                DWORD expanded_length = ExpandEnvironmentStringsA(
-                    directory, expanded, (DWORD)sizeof(expanded));
-                if (expanded_length > 0 && expanded_length < sizeof(expanded) &&
-                windows_directory_is_absolute(expanded) &&
-                jvman_path_join(candidate, sizeof(candidate), expanded, name) == 0 &&
-                    windows_try_pathext_candidate(candidate, out, out_size) == 0) return 0;
-            }
-        }
-        if (!end) break;
-        cursor = end + 1;
-    }
     return -1;
 }
 
@@ -1164,7 +1207,7 @@ int platform_spawn_wait(char *const argv[]) {
     memset(&startup, 0, sizeof(startup));
     startup.cb = sizeof(startup);
     memset(&process, 0, sizeof(process));
-    if (!CreateProcessA(effective_argv[0], command_line, NULL, NULL, TRUE, 0, NULL, NULL,
+    if (!CreateProcessA(effective_argv[0], command_line, NULL, NULL, FALSE, 0, NULL, NULL,
                         &startup, &process)) {
         platform_set_windows_error("cannot start child process");
         free(command_line);
@@ -1230,27 +1273,38 @@ int platform_find_executable(const char *name, char *out, size_t out_size) {
 }
 
 int platform_find_trusted_executable(const char *name, char *out, size_t out_size) {
+    if (!name || !*name || !out || out_size == 0) return -1;
 #if defined(_WIN32)
     return windows_resolve_trusted_command(name, out, out_size);
 #else
-    const char *path = getenv("PATH");
-    const char *cursor = path;
-    while (cursor && *cursor) {
-        const char *end = strchr(cursor, ':');
-        size_t length = end ? (size_t)(end - cursor) : strlen(cursor);
-        char directory[JVMAN_PATH_MAX];
+    static const char *const directories[] = {
+        "/usr/bin", "/bin", "/usr/sbin", "/sbin",
+        "/run/current-system/sw/bin"
+    };
+    size_t index;
+    if (strchr(name, '/') != NULL) return -1;
+    for (index = 0; index < sizeof(directories) / sizeof(directories[0]);
+         ++index) {
         char candidate[JVMAN_PATH_MAX];
-        if (length > 0 && length < sizeof(directory)) {
-            memcpy(directory, cursor, length);
-            directory[length] = '\0';
-            if (directory[0] == '/' &&
-                jvman_path_join(candidate, sizeof(candidate), directory, name) == 0 &&
-                access(candidate, X_OK) == 0) {
-                return platform_absolute_path(candidate, out, out_size);
-            }
+        char canonical[JVMAN_PATH_MAX];
+        struct stat directory_info;
+        struct stat file_info;
+        if (stat(directories[index], &directory_info) != 0 ||
+            !S_ISDIR(directory_info.st_mode) || directory_info.st_uid != 0 ||
+            (directory_info.st_mode & (S_IWGRP | S_IWOTH)) != 0 ||
+            jvman_path_join(candidate, sizeof(candidate), directories[index],
+                            name) != 0 ||
+            platform_absolute_path(candidate, canonical,
+                                   sizeof(canonical)) != 0 ||
+            stat(canonical, &file_info) != 0 || !S_ISREG(file_info.st_mode) ||
+            file_info.st_uid != 0 ||
+            (file_info.st_mode & (S_IWGRP | S_IWOTH | S_ISUID | S_ISGID)) != 0 ||
+            access(canonical, X_OK) != 0) {
+            continue;
         }
-        if (!end) break;
-        cursor = end + 1;
+        if (strlen(canonical) + 1u > out_size) return -1;
+        strcpy(out, canonical);
+        return 0;
     }
     return -1;
 #endif
@@ -1381,5 +1435,2135 @@ void platform_lock_release(PlatformLock *lock) {
 #else
     if (lock->fd >= 0) { flock(lock->fd, LOCK_UN); close(lock->fd); }
     lock->fd = -1;
+#endif
+}
+
+#if !defined(_WIN32)
+static int posix_secure_temporary_directory(char *out, size_t out_size) {
+    const char *requested = getenv("TMPDIR");
+    const char *candidates[2];
+    size_t index;
+    candidates[0] = requested && requested[0] == '/' ? requested : NULL;
+    candidates[1] = "/tmp";
+    for (index = 0; index < sizeof(candidates) / sizeof(candidates[0]);
+         ++index) {
+        char canonical[JVMAN_PATH_MAX];
+        struct stat info;
+        size_t length;
+        if (!candidates[index] || !realpath(candidates[index], canonical) ||
+            stat(canonical, &info) != 0 || !S_ISDIR(info.st_mode) ||
+            (info.st_uid != 0 && info.st_uid != geteuid()) ||
+            ((info.st_mode & (S_IWGRP | S_IWOTH)) != 0 &&
+             (info.st_mode & S_ISVTX) == 0)) {
+            continue;
+        }
+        length = strlen(canonical);
+        if (length + 1u > out_size) return -1;
+        memcpy(out, canonical, length + 1u);
+        return 0;
+    }
+    return -1;
+}
+#endif
+
+int platform_create_temporary_file(char *out, size_t out_size) {
+    if (!out || out_size == 0) {
+        platform_set_error("temporary file output is required");
+        return -1;
+    }
+    out[0] = '\0';
+#if defined(_WIN32)
+    WCHAR directory[JVMAN_PATH_MAX];
+    WCHAR path[JVMAN_PATH_MAX];
+    DWORD length;
+    unsigned int attempt;
+    length = GetTempPathW((DWORD)(sizeof(directory) / sizeof(directory[0])),
+                          directory);
+    if (length == 0 || length >= sizeof(directory) / sizeof(directory[0])) {
+        platform_set_windows_error("cannot locate the temporary directory");
+        return -1;
+    }
+    for (attempt = 0; attempt < 128u; ++attempt) {
+        HANDLE file;
+        int written = _snwprintf(
+            path, sizeof(path) / sizeof(path[0]),
+            L"%lsjvman-%08lx-%08lx-%03u.tmp", directory,
+            (unsigned long)GetCurrentProcessId(),
+            (unsigned long)GetTickCount(), attempt);
+        if (written < 0 ||
+            (size_t)written >= sizeof(path) / sizeof(path[0])) {
+            platform_set_error("temporary file path is too long");
+            return -1;
+        }
+        file = CreateFileW(path, GENERIC_READ | GENERIC_WRITE,
+                           FILE_SHARE_READ | FILE_SHARE_DELETE, NULL,
+                           CREATE_NEW, FILE_ATTRIBUTE_TEMPORARY, NULL);
+        if (file != INVALID_HANDLE_VALUE) {
+            CloseHandle(file);
+            if (platform_copy_wide_to_utf8(path, out, out_size) == 0) return 0;
+            DeleteFileW(path);
+            return -1;
+        }
+        if (GetLastError() != ERROR_FILE_EXISTS &&
+            GetLastError() != ERROR_ALREADY_EXISTS) {
+            platform_set_windows_error("cannot create a temporary file");
+            return -1;
+        }
+    }
+    platform_set_error("cannot allocate a unique temporary file");
+    return -1;
+#else
+    char directory[JVMAN_PATH_MAX];
+    char path[JVMAN_PATH_MAX];
+    struct stat info;
+    int fd;
+    int written;
+    if (posix_secure_temporary_directory(directory, sizeof(directory)) != 0) {
+        platform_set_error("cannot locate a secure temporary directory");
+        return -1;
+    }
+    written = snprintf(path, sizeof(path), "%s/jvman-XXXXXX", directory);
+    if (written < 0 || (size_t)written >= sizeof(path)) {
+        platform_set_error("temporary file path is too long");
+        return -1;
+    }
+    fd = mkstemp(path);
+    if (fd < 0) {
+        platform_set_error("cannot create a temporary file: %s",
+                           strerror(errno));
+        return -1;
+    }
+    if (fstat(fd, &info) != 0 || !S_ISREG(info.st_mode) ||
+        info.st_uid != geteuid() || info.st_nlink != 1 ||
+        fchmod(fd, 0600) != 0) {
+        int saved_error = errno ? errno : EINVAL;
+        close(fd);
+        unlink(path);
+        platform_set_error("cannot secure a temporary file: %s",
+                           strerror(saved_error));
+        return -1;
+    }
+    if (close(fd) != 0) {
+        int saved_error = errno;
+        unlink(path);
+        platform_set_error("cannot close a temporary file: %s",
+                           strerror(saved_error));
+        return -1;
+    }
+    if (strlen(path) + 1u > out_size) {
+        unlink(path);
+        platform_set_error("temporary file path is too long");
+        return -1;
+    }
+    strcpy(out, path);
+    return 0;
+#endif
+}
+
+int platform_read_file_limited(const char *path, size_t limit,
+                               char **data_out, size_t *size_out) {
+    char *data;
+    size_t size;
+    if (!path || !data_out || !size_out || limit == 0) {
+        platform_set_error("invalid limited file read");
+        return -1;
+    }
+    *data_out = NULL;
+    *size_out = 0;
+#if defined(_WIN32)
+    WCHAR *wide = NULL;
+    HANDLE file = INVALID_HANDLE_VALUE;
+    LARGE_INTEGER file_size;
+    size_t offset = 0;
+    if (platform_utf8_to_wide(path, &wide) != 0) return -1;
+    file = CreateFileW(wide, GENERIC_READ,
+                       FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                       NULL, OPEN_EXISTING,
+                       FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN |
+                           FILE_FLAG_OPEN_REPARSE_POINT,
+                       NULL);
+    free(wide);
+    if (file == INVALID_HANDLE_VALUE) {
+        platform_set_windows_error("cannot open downloaded file");
+        return -1;
+    }
+    if (!GetFileSizeEx(file, &file_size) || file_size.QuadPart < 0 ||
+        (uint64_t)file_size.QuadPart > (uint64_t)limit ||
+        (uint64_t)file_size.QuadPart > (uint64_t)(SIZE_MAX - 1u)) {
+        CloseHandle(file);
+        platform_set_error("downloaded file exceeds the allowed size");
+        return -1;
+    }
+    size = (size_t)file_size.QuadPart;
+    data = (char *)malloc(size + 1u);
+    if (!data) {
+        CloseHandle(file);
+        platform_set_error("out of memory reading downloaded file");
+        return -1;
+    }
+    while (offset < size) {
+        DWORD request = size - offset > 64u * 1024u
+                            ? 64u * 1024u
+                            : (DWORD)(size - offset);
+        DWORD count = 0;
+        if (!ReadFile(file, data + offset, request, &count, NULL) ||
+            count == 0) {
+            free(data);
+            CloseHandle(file);
+            platform_set_windows_error("cannot read downloaded file");
+            return -1;
+        }
+        offset += count;
+    }
+    CloseHandle(file);
+#else
+    int fd;
+    struct stat info;
+    size_t offset = 0;
+    int flags = O_RDONLY;
+#ifdef O_NOFOLLOW
+    flags |= O_NOFOLLOW;
+#endif
+    fd = open(path, flags);
+    if (fd < 0 || fstat(fd, &info) != 0 || !S_ISREG(info.st_mode) ||
+        info.st_uid != geteuid() || info.st_nlink != 1 ||
+        (info.st_mode & (S_IWGRP | S_IWOTH)) != 0 ||
+        info.st_size < 0 || (uintmax_t)info.st_size > (uintmax_t)limit ||
+        (uintmax_t)info.st_size > (uintmax_t)(SIZE_MAX - 1u)) {
+        if (fd >= 0) close(fd);
+        platform_set_error("cannot safely read downloaded file: %s",
+                           strerror(errno ? errno : EINVAL));
+        return -1;
+    }
+    size = (size_t)info.st_size;
+    data = (char *)malloc(size + 1u);
+    if (!data) {
+        close(fd);
+        platform_set_error("out of memory reading downloaded file");
+        return -1;
+    }
+    while (offset < size) {
+        ssize_t count = read(fd, data + offset, size - offset);
+        if (count < 0 && errno == EINTR) continue;
+        if (count <= 0) {
+            free(data);
+            close(fd);
+            platform_set_error("cannot read downloaded file: %s",
+                               strerror(errno));
+            return -1;
+        }
+        offset += (size_t)count;
+    }
+    close(fd);
+#endif
+    data[size] = '\0';
+    *data_out = data;
+    *size_out = size;
+    return 0;
+}
+
+int platform_current_executable(char *out, size_t out_size) {
+    if (!out || out_size == 0) {
+        platform_set_error("executable path output is required");
+        return -1;
+    }
+#if defined(_WIN32)
+    WCHAR path[JVMAN_PATH_MAX];
+    DWORD length = GetModuleFileNameW(
+        NULL, path, (DWORD)(sizeof(path) / sizeof(path[0])));
+    if (length == 0 || length >= sizeof(path) / sizeof(path[0])) {
+        platform_set_windows_error("cannot locate the running executable");
+        return -1;
+    }
+    return platform_copy_wide_to_utf8(path, out, out_size);
+#elif defined(__APPLE__)
+    uint32_t size = 0;
+    char unresolved[JVMAN_PATH_MAX];
+    char resolved[JVMAN_PATH_MAX];
+    (void)_NSGetExecutablePath(NULL, &size);
+    if (size == 0 || size > sizeof(unresolved) ||
+        _NSGetExecutablePath(unresolved, &size) != 0 ||
+        !realpath(unresolved, resolved)) {
+        platform_set_error("cannot locate the running executable: %s",
+                           strerror(errno));
+        return -1;
+    }
+    if (strlen(resolved) + 1u > out_size) {
+        platform_set_error("running executable path is too long");
+        return -1;
+    }
+    strcpy(out, resolved);
+    return 0;
+#elif defined(__linux__)
+    char path[JVMAN_PATH_MAX];
+    ssize_t length = readlink("/proc/self/exe", path, sizeof(path) - 1u);
+    if (length <= 0 || (size_t)length >= sizeof(path) - 1u) {
+        platform_set_error("cannot locate the running executable: %s",
+                           strerror(errno));
+        return -1;
+    }
+    path[length] = '\0';
+    if ((size_t)length + 1u > out_size) {
+        platform_set_error("running executable path is too long");
+        return -1;
+    }
+    strcpy(out, path);
+    return 0;
+#else
+    (void)out;
+    (void)out_size;
+    platform_set_error("self-update is unsupported on this operating system");
+    return -1;
+#endif
+}
+
+#if !defined(_WIN32)
+static int posix_sha256_fd(int fd, unsigned char digest[32]) {
+    unsigned char buffer[64u * 1024u];
+    JvmanSha256 context;
+    if (fd < 0 || !digest || lseek(fd, 0, SEEK_SET) < 0) return -1;
+    jvman_sha256_init(&context);
+    for (;;) {
+        ssize_t count = read(fd, buffer, sizeof(buffer));
+        if (count < 0 && errno == EINTR) continue;
+        if (count < 0) return -1;
+        if (count == 0) break;
+        jvman_sha256_update(&context, buffer, (size_t)count);
+    }
+    jvman_sha256_final(&context, digest);
+    return 0;
+}
+
+static int posix_lock_update_target(int fd) {
+    struct timespec deadline;
+    if (clock_gettime(CLOCK_MONOTONIC, &deadline) != 0) return -1;
+    deadline.tv_sec += 120;
+    for (;;) {
+        struct timespec delay;
+        struct timespec now;
+        if (flock(fd, LOCK_EX | LOCK_NB) == 0) return 0;
+        if (errno != EINTR && errno != EWOULDBLOCK && errno != EAGAIN) {
+            return -1;
+        }
+        for (;;) {
+            if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) return -1;
+            if (now.tv_sec > deadline.tv_sec ||
+                (now.tv_sec == deadline.tv_sec &&
+                 now.tv_nsec >= deadline.tv_nsec)) {
+                errno = ETIMEDOUT;
+                return -1;
+            }
+            delay.tv_sec = deadline.tv_sec - now.tv_sec;
+            delay.tv_nsec = deadline.tv_nsec - now.tv_nsec;
+            if (delay.tv_nsec < 0) {
+                --delay.tv_sec;
+                delay.tv_nsec += 1000000000L;
+            }
+            if (delay.tv_sec > 0 || delay.tv_nsec > 100000000L) {
+                delay.tv_sec = 0;
+                delay.tv_nsec = 100000000L;
+            }
+            if (nanosleep(&delay, NULL) == 0) break;
+            if (errno != EINTR) return -1;
+        }
+    }
+}
+
+static int posix_open_update_directory(const char *target, char *directory,
+                                       size_t directory_size,
+                                       const char **name_out) {
+    const char *separator;
+    struct stat info;
+    size_t length;
+    int flags = O_RDONLY;
+    int fd;
+    if (!target || !directory || directory_size == 0 || !name_out) {
+        errno = EINVAL;
+        return -1;
+    }
+    separator = strrchr(target, '/');
+    if (!separator || separator[1] == '\0') {
+        errno = EINVAL;
+        return -1;
+    }
+    length = separator == target ? 1u : (size_t)(separator - target);
+    if (length + 1u > directory_size) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+    memcpy(directory, target, length);
+    directory[length] = '\0';
+    *name_out = separator + 1;
+#ifdef O_DIRECTORY
+    flags |= O_DIRECTORY;
+#endif
+#ifdef O_NOFOLLOW
+    flags |= O_NOFOLLOW;
+#endif
+#ifdef O_CLOEXEC
+    flags |= O_CLOEXEC;
+#endif
+    fd = open(directory, flags);
+    if (fd < 0) return -1;
+    if (fstat(fd, &info) != 0) {
+        int saved_error = errno;
+        close(fd);
+        errno = saved_error;
+        return -1;
+    }
+    if (!S_ISDIR(info.st_mode) ||
+        (info.st_uid != 0 && info.st_uid != geteuid()) ||
+        ((info.st_mode & (S_IWGRP | S_IWOTH)) != 0 &&
+         (info.st_mode & S_ISVTX) == 0)) {
+        close(fd);
+        errno = EACCES;
+        return -1;
+    }
+    return fd;
+}
+#endif
+
+int platform_sha256_file(const char *path, unsigned char digest[32]) {
+    if (!path || !digest) {
+        platform_set_error("invalid SHA-256 file input");
+        return -1;
+    }
+#if defined(_WIN32)
+    WCHAR *wide = NULL;
+    HANDLE file = INVALID_HANDLE_VALUE;
+    unsigned char buffer[64u * 1024u];
+    JvmanSha256 context;
+    if (platform_utf8_to_wide(path, &wide) != 0) return -1;
+    file = CreateFileW(wide, GENERIC_READ,
+                       FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                       NULL, OPEN_EXISTING,
+                       FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN |
+                           FILE_FLAG_OPEN_REPARSE_POINT,
+                       NULL);
+    free(wide);
+    if (file == INVALID_HANDLE_VALUE) {
+        platform_set_windows_error("cannot open file for SHA-256");
+        return -1;
+    }
+    jvman_sha256_init(&context);
+    for (;;) {
+        DWORD count = 0;
+        if (!ReadFile(file, buffer, (DWORD)sizeof(buffer), &count, NULL)) {
+            CloseHandle(file);
+            platform_set_windows_error("cannot read file for SHA-256");
+            return -1;
+        }
+        if (count == 0) break;
+        jvman_sha256_update(&context, buffer, count);
+    }
+    CloseHandle(file);
+    jvman_sha256_final(&context, digest);
+    return 0;
+#else
+    int flags = O_RDONLY;
+    int fd;
+    struct stat info;
+#ifdef O_NOFOLLOW
+    flags |= O_NOFOLLOW;
+#endif
+    fd = open(path, flags);
+    if (fd < 0 || fstat(fd, &info) != 0 || !S_ISREG(info.st_mode) ||
+        posix_sha256_fd(fd, digest) != 0) {
+        int saved_error = errno ? errno : EINVAL;
+        if (fd >= 0) close(fd);
+        platform_set_error("cannot calculate SHA-256 for '%s': %s", path,
+                           strerror(saved_error));
+        return -1;
+    }
+    close(fd);
+    return 0;
+#endif
+}
+
+#if defined(_WIN32)
+static int windows_https_download(const char *url, const char *destination,
+                                  size_t limit) {
+    WCHAR *wide_url = NULL;
+    WCHAR *wide_destination = NULL;
+    URL_COMPONENTSW components;
+    WCHAR host[256];
+    WCHAR resource[2048];
+    HINTERNET session = NULL;
+    HINTERNET connection = NULL;
+    HINTERNET request = NULL;
+    HANDLE output = INVALID_HANDLE_VALUE;
+    DWORD status = 0;
+    DWORD status_size = sizeof(status);
+    DWORD redirect_policy =
+        WINHTTP_OPTION_REDIRECT_POLICY_DISALLOW_HTTPS_TO_HTTP;
+    BY_HANDLE_FILE_INFORMATION output_info;
+    size_t resource_length;
+    uint64_t total = 0;
+    int truncate_existing = 0;
+    int result = -1;
+    if (!url || strncmp(url, "https://", 8) != 0 ||
+        strlen(url) >= JVMAN_PATH_MAX ||
+        platform_utf8_to_wide(url, &wide_url) != 0 ||
+        platform_utf8_to_wide(destination, &wide_destination) != 0) {
+        free(wide_url);
+        free(wide_destination);
+        platform_set_error("invalid HTTPS download path");
+        return -1;
+    }
+    memset(&components, 0, sizeof(components));
+    components.dwStructSize = sizeof(components);
+    components.dwHostNameLength = (DWORD)-1;
+    components.dwUrlPathLength = (DWORD)-1;
+    components.dwExtraInfoLength = (DWORD)-1;
+    if (!WinHttpCrackUrl(wide_url, 0, 0, &components) ||
+        components.nScheme != INTERNET_SCHEME_HTTPS ||
+        components.dwHostNameLength == 0 ||
+        components.dwHostNameLength >= sizeof(host) / sizeof(host[0]) ||
+        components.dwUserNameLength != 0 ||
+        components.dwPasswordLength != 0) {
+        platform_set_windows_error("cannot parse HTTPS download URL");
+        goto done;
+    }
+    memcpy(host, components.lpszHostName,
+           components.dwHostNameLength * sizeof(host[0]));
+    host[components.dwHostNameLength] = L'\0';
+    resource_length = (size_t)components.dwUrlPathLength +
+                      (size_t)components.dwExtraInfoLength;
+    if (resource_length == 0 ||
+        resource_length >= sizeof(resource) / sizeof(resource[0])) {
+        platform_set_error("HTTPS resource path is too long");
+        goto done;
+    }
+    memcpy(resource, components.lpszUrlPath,
+           components.dwUrlPathLength * sizeof(resource[0]));
+    if (components.dwExtraInfoLength != 0) {
+        memcpy(resource + components.dwUrlPathLength, components.lpszExtraInfo,
+               components.dwExtraInfoLength * sizeof(resource[0]));
+    }
+    resource[resource_length] = L'\0';
+    output = CreateFileW(wide_destination, GENERIC_WRITE, FILE_SHARE_READ,
+                          NULL, CREATE_NEW,
+                          FILE_ATTRIBUTE_TEMPORARY |
+                              FILE_FLAG_SEQUENTIAL_SCAN |
+                              FILE_FLAG_OPEN_REPARSE_POINT,
+                          NULL);
+    if (output == INVALID_HANDLE_VALUE &&
+        (GetLastError() == ERROR_FILE_EXISTS ||
+         GetLastError() == ERROR_ALREADY_EXISTS)) {
+        truncate_existing = 1;
+        output = CreateFileW(wide_destination, GENERIC_WRITE, FILE_SHARE_READ,
+                             NULL, OPEN_EXISTING,
+                             FILE_ATTRIBUTE_TEMPORARY |
+                                 FILE_FLAG_SEQUENTIAL_SCAN |
+                                 FILE_FLAG_OPEN_REPARSE_POINT,
+                             NULL);
+    }
+    if (output == INVALID_HANDLE_VALUE) {
+        platform_set_windows_error("cannot open download destination");
+        goto done;
+    }
+    memset(&output_info, 0, sizeof(output_info));
+    if (!GetFileInformationByHandle(output, &output_info)) {
+        platform_set_windows_error("cannot inspect download destination");
+        goto done;
+    }
+    if ((output_info.dwFileAttributes &
+             (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) != 0 ||
+        output_info.nNumberOfLinks != 1u) {
+        platform_set_error("download destination failed safety checks");
+        goto done;
+    }
+    if (truncate_existing && !SetEndOfFile(output)) {
+        platform_set_windows_error("download destination failed safety checks");
+        goto done;
+    }
+    session = WinHttpOpen(L"jvman/" JVMAN_VERSION_W,
+                          WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+                          WINHTTP_NO_PROXY_NAME,
+                          WINHTTP_NO_PROXY_BYPASS, 0);
+    if (!session) {
+        platform_set_windows_error("cannot initialize Windows HTTPS");
+        goto done;
+    }
+    if (!WinHttpSetTimeouts(session, 30000, 30000, 30000, 300000)) {
+        platform_set_windows_error("cannot set HTTPS timeouts");
+        goto done;
+    }
+    connection = WinHttpConnect(session, host, components.nPort, 0);
+    if (!connection) {
+        platform_set_windows_error("cannot connect to HTTPS host");
+        goto done;
+    }
+    request = WinHttpOpenRequest(connection, L"GET", resource, NULL,
+                                 WINHTTP_NO_REFERER,
+                                 WINHTTP_DEFAULT_ACCEPT_TYPES,
+                                 WINHTTP_FLAG_SECURE);
+    if (!request ||
+        !WinHttpSetOption(request, WINHTTP_OPTION_REDIRECT_POLICY,
+                          &redirect_policy, sizeof(redirect_policy)) ||
+        !WinHttpSendRequest(request, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
+                            WINHTTP_NO_REQUEST_DATA, 0, 0, 0) ||
+        !WinHttpReceiveResponse(request, NULL)) {
+        platform_set_windows_error("HTTPS request failed");
+        goto done;
+    }
+    if (!WinHttpQueryHeaders(request,
+                             WINHTTP_QUERY_STATUS_CODE |
+                                 WINHTTP_QUERY_FLAG_NUMBER,
+                             WINHTTP_HEADER_NAME_BY_INDEX, &status,
+                             &status_size, WINHTTP_NO_HEADER_INDEX) ||
+        status != 200u) {
+        platform_set_error("HTTPS server returned status %lu",
+                           (unsigned long)status);
+        goto done;
+    }
+    for (;;) {
+        unsigned char buffer[64u * 1024u];
+        DWORD count = 0;
+        DWORD written = 0;
+        if (!WinHttpReadData(request, buffer, (DWORD)sizeof(buffer), &count)) {
+            platform_set_windows_error("cannot read HTTPS response");
+            goto done;
+        }
+        if (count == 0) break;
+        if ((uint64_t)count > (uint64_t)limit - total) {
+            platform_set_error("HTTPS response exceeds the allowed size");
+            goto done;
+        }
+        if (!WriteFile(output, buffer, count, &written, NULL) ||
+            written != count) {
+            platform_set_windows_error("cannot write HTTPS response");
+            goto done;
+        }
+        total += count;
+    }
+    if (total == 0) {
+        platform_set_error("HTTPS response is empty");
+        goto done;
+    }
+    if (!FlushFileBuffers(output)) {
+        platform_set_windows_error("cannot flush downloaded file");
+        goto done;
+    }
+    result = 0;
+done:
+    if (request) WinHttpCloseHandle(request);
+    if (connection) WinHttpCloseHandle(connection);
+    if (session) WinHttpCloseHandle(session);
+    if (output != INVALID_HANDLE_VALUE) CloseHandle(output);
+    free(wide_destination);
+    free(wide_url);
+    return result;
+}
+#endif
+
+int platform_https_download(const char *url, const char *destination,
+                            size_t limit, int show_progress) {
+    if (!url || !destination || limit == 0 ||
+        strncmp(url, "https://", 8) != 0) {
+        platform_set_error("invalid HTTPS download request");
+        return -1;
+    }
+#if defined(_WIN32)
+    (void)show_progress;
+    return windows_https_download(url, destination, limit);
+#else
+    char downloader[JVMAN_PATH_MAX];
+    char limit_text[32];
+    char *arguments[32];
+    unsigned char buffer[64u * 1024u];
+    struct stat path_info;
+    struct stat output_info;
+    int pipe_fds[2] = {-1, -1};
+    int output = -1;
+    int output_flags = O_WRONLY;
+    int path_existed = 0;
+    int index = 0;
+    int written;
+    int status = 0;
+    int child_waited = 0;
+    int failed = 0;
+    size_t total = 0;
+    pid_t child = -1;
+    written = snprintf(limit_text, sizeof(limit_text), "%zu", limit);
+    if (written < 0 || (size_t)written >= sizeof(limit_text) ||
+        platform_find_trusted_executable("curl", downloader,
+                                         sizeof(downloader)) != 0) {
+        platform_set_error("trusted curl executable is not available");
+        return -1;
+    }
+    arguments[index++] = downloader;
+    arguments[index++] = "--disable";
+    arguments[index++] = "--fail";
+    arguments[index++] = "--location";
+    arguments[index++] = "--show-error";
+    arguments[index++] = "--retry";
+    arguments[index++] = "2";
+    if (show_progress) arguments[index++] = "--progress-bar";
+    else arguments[index++] = "--silent";
+    arguments[index++] = "--header";
+    arguments[index++] = "User-Agent: jvman/" JVMAN_VERSION;
+    arguments[index++] = "--connect-timeout";
+    arguments[index++] = "30";
+    arguments[index++] = "--max-time";
+    arguments[index++] = "300";
+    arguments[index++] = "--proto";
+    arguments[index++] = "=https";
+    arguments[index++] = "--proto-redir";
+    arguments[index++] = "=https";
+    arguments[index++] = "--max-filesize";
+    arguments[index++] = limit_text;
+    arguments[index++] = (char *)url;
+    arguments[index] = NULL;
+
+    if (lstat(destination, &path_info) == 0) {
+        if (!S_ISREG(path_info.st_mode) || path_info.st_nlink != 1 ||
+            path_info.st_uid != geteuid()) {
+            platform_set_error("download destination failed safety checks");
+            return -1;
+        }
+        path_existed = 1;
+    } else if (errno != ENOENT) {
+        platform_set_error("cannot inspect download destination: %s",
+                           strerror(errno));
+        return -1;
+    } else {
+        output_flags |= O_CREAT | O_EXCL;
+    }
+#ifdef O_NOFOLLOW
+    output_flags |= O_NOFOLLOW;
+#endif
+    output = open(destination, output_flags, 0600);
+    if (output < 0 || fstat(output, &output_info) != 0 ||
+        !S_ISREG(output_info.st_mode) || output_info.st_nlink != 1 ||
+        output_info.st_uid != geteuid() ||
+        (path_existed &&
+         (path_info.st_dev != output_info.st_dev ||
+          path_info.st_ino != output_info.st_ino)) ||
+        fchmod(output, 0600) != 0 ||
+        (path_existed && ftruncate(output, 0) != 0)) {
+        if (output >= 0) close(output);
+        platform_set_error("cannot safely open download destination: %s",
+                           strerror(errno));
+        return -1;
+    }
+    if (pipe(pipe_fds) != 0) {
+        platform_set_error("cannot create HTTPS response pipe: %s",
+                           strerror(errno));
+        close(output);
+        return -1;
+    }
+    child = fork();
+    if (child < 0) {
+        platform_set_error("cannot start HTTPS downloader: %s",
+                           strerror(errno));
+        close(pipe_fds[0]);
+        close(pipe_fds[1]);
+        close(output);
+        return -1;
+    }
+    if (child == 0) {
+        close(pipe_fds[0]);
+        if (dup2(pipe_fds[1], STDOUT_FILENO) < 0) _exit(127);
+        close(pipe_fds[1]);
+        close(output);
+        execv(downloader, arguments);
+        _exit(127);
+    }
+    close(pipe_fds[1]);
+    pipe_fds[1] = -1;
+    for (;;) {
+        ssize_t count = read(pipe_fds[0], buffer, sizeof(buffer));
+        size_t offset = 0;
+        if (count < 0 && errno == EINTR) continue;
+        if (count < 0) {
+            platform_set_error("cannot read HTTPS response stream: %s",
+                               strerror(errno));
+            failed = 1;
+            break;
+        }
+        if (count == 0) break;
+        if ((size_t)count > limit - total) {
+            failed = 1;
+            platform_set_error("HTTPS response exceeds the allowed size");
+            break;
+        }
+        while (offset < (size_t)count) {
+            ssize_t count_written = write(
+                output, buffer + offset, (size_t)count - offset);
+            if (count_written < 0 && errno == EINTR) continue;
+            if (count_written <= 0) {
+                platform_set_error("cannot write HTTPS response: %s",
+                                   strerror(errno));
+                failed = 1;
+                break;
+            }
+            offset += (size_t)count_written;
+        }
+        if (failed) break;
+        total += (size_t)count;
+    }
+    close(pipe_fds[0]);
+    pipe_fds[0] = -1;
+    if (failed) (void)kill(child, SIGKILL);
+    for (;;) {
+        pid_t waited = waitpid(child, &status, 0);
+        if (waited == child) {
+            child_waited = 1;
+            break;
+        }
+        if (waited < 0 && errno == EINTR) continue;
+        platform_set_error("cannot wait for HTTPS downloader: %s",
+                           strerror(errno));
+        failed = 1;
+        break;
+    }
+    if (!failed && (!WIFEXITED(status) || WEXITSTATUS(status) != 0)) {
+        platform_set_error("HTTPS downloader exited unsuccessfully");
+        failed = 1;
+    }
+    if (!failed && total == 0) {
+        platform_set_error("HTTPS response is empty");
+        failed = 1;
+    }
+    if (!failed && fsync(output) != 0) {
+        platform_set_error("cannot flush downloaded file: %s", strerror(errno));
+        failed = 1;
+    }
+    if (pipe_fds[0] >= 0) close(pipe_fds[0]);
+    if (pipe_fds[1] >= 0) close(pipe_fds[1]);
+    if (child > 0 && !child_waited) {
+        (void)kill(child, SIGKILL);
+        while (waitpid(child, NULL, 0) < 0 && errno == EINTR) {}
+    }
+    if (close(output) != 0 && !failed) {
+        platform_set_error("cannot close downloaded file: %s", strerror(errno));
+        failed = 1;
+    }
+    return failed ? -1 : 0;
+#endif
+}
+
+static int platform_read_exact_at(const char *path, uint64_t offset,
+                                  unsigned char *buffer, size_t size) {
+    if (!path || !buffer || size == 0) return -1;
+#if defined(_WIN32)
+    WCHAR *wide = NULL;
+    HANDLE file = INVALID_HANDLE_VALUE;
+    LARGE_INTEGER position;
+    DWORD attributes;
+    size_t used = 0;
+    if (offset > (uint64_t)INT64_MAX ||
+        platform_utf8_to_wide(path, &wide) != 0) return -1;
+    attributes = GetFileAttributesW(wide);
+    if (attributes == INVALID_FILE_ATTRIBUTES ||
+        (attributes & (FILE_ATTRIBUTE_DIRECTORY |
+                       FILE_ATTRIBUTE_REPARSE_POINT)) != 0) {
+        free(wide);
+        return -1;
+    }
+    file = CreateFileW(wide, GENERIC_READ,
+                       FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                       NULL, OPEN_EXISTING,
+                       FILE_ATTRIBUTE_NORMAL | FILE_FLAG_RANDOM_ACCESS,
+                       NULL);
+    free(wide);
+    if (file == INVALID_HANDLE_VALUE) return -1;
+    position.QuadPart = (LONGLONG)offset;
+    if (!SetFilePointerEx(file, position, NULL, FILE_BEGIN)) {
+        CloseHandle(file);
+        return -1;
+    }
+    while (used < size) {
+        DWORD request = size - used > UINT32_MAX
+                            ? UINT32_MAX
+                            : (DWORD)(size - used);
+        DWORD count = 0;
+        if (!ReadFile(file, buffer + used, request, &count, NULL) ||
+            count == 0) {
+            CloseHandle(file);
+            return -1;
+        }
+        used += count;
+    }
+    CloseHandle(file);
+    return 0;
+#else
+    int flags = O_RDONLY;
+    int fd;
+    struct stat info;
+    size_t used = 0;
+#ifdef O_NOFOLLOW
+    flags |= O_NOFOLLOW;
+#endif
+    fd = open(path, flags);
+    if (fd < 0 || fstat(fd, &info) != 0 || !S_ISREG(info.st_mode)) {
+        if (fd >= 0) close(fd);
+        return -1;
+    }
+    while (used < size) {
+        ssize_t count = pread(fd, buffer + used, size - used,
+                              (off_t)(offset + used));
+        if (count < 0 && errno == EINTR) continue;
+        if (count <= 0) {
+            close(fd);
+            return -1;
+        }
+        used += (size_t)count;
+    }
+    close(fd);
+    return 0;
+#endif
+}
+
+#if defined(_WIN32) || defined(__linux__)
+static uint16_t platform_u16_le(const unsigned char *bytes) {
+    return (uint16_t)((uint16_t)bytes[0] |
+                      ((uint16_t)bytes[1] << 8));
+}
+#endif
+
+#if defined(_WIN32) || defined(__APPLE__)
+static uint32_t platform_u32_le(const unsigned char *bytes) {
+    return (uint32_t)bytes[0] |
+           ((uint32_t)bytes[1] << 8) |
+           ((uint32_t)bytes[2] << 16) |
+           ((uint32_t)bytes[3] << 24);
+}
+#endif
+
+int platform_validate_executable_image(const char *path) {
+    unsigned char header[64];
+    if (platform_read_exact_at(path, 0, header, sizeof(header)) != 0) {
+        platform_set_error("cannot read executable image header");
+        return -1;
+    }
+#if defined(_WIN32)
+    {
+        unsigned char pe[6];
+        uint32_t pe_offset;
+        uint16_t expected_machine;
+#if defined(_M_ARM64) || defined(__aarch64__)
+        expected_machine = 0xaa64u;
+#elif defined(_M_X64) || defined(__x86_64__) || defined(__amd64__)
+        expected_machine = 0x8664u;
+#elif defined(_M_IX86) || defined(__i386__)
+        expected_machine = 0x014cu;
+#else
+        platform_set_error("unsupported Windows update architecture");
+        return -1;
+#endif
+        if (header[0] != 'M' || header[1] != 'Z') {
+            platform_set_error("release asset does not contain a DOS/PE header");
+            return -1;
+        }
+        pe_offset = platform_u32_le(header + 60);
+        if (pe_offset < 64u || pe_offset > 16u * 1024u * 1024u ||
+            platform_read_exact_at(path, pe_offset, pe, sizeof(pe)) != 0 ||
+            memcmp(pe, "PE\0\0", 4) != 0 ||
+            platform_u16_le(pe + 4) != expected_machine) {
+            platform_set_error("release PE image has the wrong format or architecture");
+            return -1;
+        }
+    }
+#elif defined(__linux__)
+    {
+        uint16_t machine;
+#if defined(__aarch64__)
+        const uint16_t expected_machine = 183u;
+#elif defined(__x86_64__) || defined(__amd64__)
+        const uint16_t expected_machine = 62u;
+#else
+        platform_set_error("unsupported Linux update architecture");
+        return -1;
+#endif
+        if (header[0] != 0x7fu || header[1] != 'E' ||
+            header[2] != 'L' || header[3] != 'F' ||
+            header[4] != 2u || header[5] != 1u) {
+            platform_set_error("release asset is not a 64-bit little-endian ELF image");
+            return -1;
+        }
+        machine = platform_u16_le(header + 18);
+        if (machine != expected_machine) {
+            platform_set_error("release ELF image has the wrong architecture");
+            return -1;
+        }
+    }
+#elif defined(__APPLE__)
+    {
+        uint32_t cpu_type;
+#if defined(__aarch64__)
+        const uint32_t expected_cpu = 0x0100000cu;
+#elif defined(__x86_64__) || defined(__amd64__)
+        const uint32_t expected_cpu = 0x01000007u;
+#else
+        platform_set_error("unsupported macOS update architecture");
+        return -1;
+#endif
+        if (header[0] != 0xcfu || header[1] != 0xfau ||
+            header[2] != 0xedu || header[3] != 0xfeu) {
+            platform_set_error("release asset is not a 64-bit Mach-O image");
+            return -1;
+        }
+        cpu_type = platform_u32_le(header + 4);
+        if (cpu_type != expected_cpu) {
+            platform_set_error("release Mach-O image has the wrong architecture");
+            return -1;
+        }
+    }
+#else
+    platform_set_error("self-update is unsupported on this operating system");
+    return -1;
+#endif
+    return 0;
+}
+
+static int platform_sha256_text_valid(const char *text) {
+    size_t index;
+    if (!text || strlen(text) != 64u) return 0;
+    for (index = 0; index < 64u; ++index) {
+        if (!isxdigit((unsigned char)text[index])) return 0;
+    }
+    return 1;
+}
+
+#if defined(_WIN32)
+static int windows_file_is_regular(const WCHAR *path) {
+    DWORD attributes;
+    if (!path || !*path) return 0;
+    attributes = GetFileAttributesW(path);
+    return attributes != INVALID_FILE_ATTRIBUTES &&
+           (attributes & (FILE_ATTRIBUTE_DIRECTORY |
+                          FILE_ATTRIBUTE_REPARSE_POINT)) == 0;
+}
+
+static int windows_get_module_path(WCHAR *out, size_t capacity) {
+    DWORD length;
+    if (!out || capacity == 0 || capacity > UINT32_MAX) return -1;
+    length = GetModuleFileNameW(NULL, out, (DWORD)capacity);
+    return length > 0 && (size_t)length < capacity ? 0 : -1;
+}
+
+static int windows_process_is_elevated(int *elevated_out) {
+    TOKEN_ELEVATION elevation;
+    HANDLE token = NULL;
+    BOOL query_succeeded;
+    DWORD returned = 0;
+    if (!elevated_out) return -1;
+    *elevated_out = 0;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) {
+        return -1;
+    }
+    memset(&elevation, 0, sizeof(elevation));
+    query_succeeded = GetTokenInformation(
+        token, TokenElevation, &elevation, sizeof(elevation), &returned);
+    if (!query_succeeded || returned != sizeof(elevation)) {
+        DWORD error = query_succeeded ? ERROR_INVALID_DATA : GetLastError();
+        CloseHandle(token);
+        SetLastError(error);
+        return -1;
+    }
+    CloseHandle(token);
+    *elevated_out = elevation.TokenIsElevated != 0;
+    return 0;
+}
+
+static int windows_sha256_handle(HANDLE file,
+                                 unsigned char digest[32]);
+
+static int windows_sha256_file_w(const WCHAR *path,
+                                 unsigned char digest[32]) {
+    BY_HANDLE_FILE_INFORMATION info;
+    HANDLE file;
+    int result;
+    if (!path || !digest) return -1;
+    file = CreateFileW(path, GENERIC_READ,
+                       FILE_SHARE_READ,
+                       NULL, OPEN_EXISTING,
+                       FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN |
+                           FILE_FLAG_OPEN_REPARSE_POINT,
+                       NULL);
+    if (file == INVALID_HANDLE_VALUE) return -1;
+    memset(&info, 0, sizeof(info));
+    if (!GetFileInformationByHandle(file, &info) ||
+        (info.dwFileAttributes &
+         (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) != 0 ||
+        info.nNumberOfLinks != 1u) {
+        CloseHandle(file);
+        return -1;
+    }
+    result = windows_sha256_handle(file, digest);
+    CloseHandle(file);
+    return result;
+}
+
+static int windows_sha256_handle(HANDLE file,
+                                 unsigned char digest[32]) {
+    unsigned char buffer[64u * 1024u];
+    JvmanSha256 context;
+    LARGE_INTEGER start;
+    if (!file || file == INVALID_HANDLE_VALUE || !digest) return -1;
+    start.QuadPart = 0;
+    if (!SetFilePointerEx(file, start, NULL, FILE_BEGIN)) return -1;
+    jvman_sha256_init(&context);
+    for (;;) {
+        DWORD count = 0;
+        if (!ReadFile(file, buffer, (DWORD)sizeof(buffer), &count, NULL)) {
+            return -1;
+        }
+        if (count == 0) break;
+        jvman_sha256_update(&context, buffer, count);
+    }
+    jvman_sha256_final(&context, digest);
+    return 0;
+}
+
+static void windows_digest_to_wide(const unsigned char digest[32],
+                                   WCHAR out[65]) {
+    static const WCHAR hex[] = L"0123456789abcdef";
+    size_t index;
+    for (index = 0; index < 32u; ++index) {
+        out[index * 2u] = hex[digest[index] >> 4];
+        out[index * 2u + 1u] = hex[digest[index] & 0x0fu];
+    }
+    out[64] = L'\0';
+}
+
+static int windows_checksum_w_valid(const WCHAR *text) {
+    size_t index;
+    if (!text || wcslen(text) != 64u) return 0;
+    for (index = 0; index < 64u; ++index) {
+        WCHAR ch = text[index];
+        if (!((ch >= L'0' && ch <= L'9') ||
+              (ch >= L'a' && ch <= L'f') ||
+              (ch >= L'A' && ch <= L'F'))) return 0;
+    }
+    return 1;
+}
+
+static int windows_digest_matches_w(const unsigned char digest[32],
+                                    const WCHAR *expected) {
+    WCHAR actual[65];
+    windows_digest_to_wide(digest, actual);
+    return windows_checksum_w_valid(expected) &&
+           _wcsicmp(actual, expected) == 0;
+}
+
+static int windows_update_helper_path_valid(const WCHAR *module);
+
+static HANDLE windows_acquire_update_mutex(const WCHAR *target) {
+    WCHAR name[96];
+    WCHAR canonical[JVMAN_PATH_MAX];
+    WCHAR digest_text[65];
+    unsigned char digest[32];
+    JvmanSha256 context;
+    HANDLE target_file;
+    HANDLE mutex;
+    DWORD canonical_length;
+    DWORD wait_result;
+    if (!target || !*target) return NULL;
+    target_file = CreateFileW(
+        target, FILE_READ_ATTRIBUTES,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        NULL, OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+    if (target_file == INVALID_HANDLE_VALUE) return NULL;
+    canonical_length = GetFinalPathNameByHandleW(
+        target_file, canonical,
+        (DWORD)(sizeof(canonical) / sizeof(canonical[0])),
+        FILE_NAME_NORMALIZED | VOLUME_NAME_GUID);
+    CloseHandle(target_file);
+    if (canonical_length == 0 ||
+        canonical_length >= sizeof(canonical) / sizeof(canonical[0])) {
+        return NULL;
+    }
+    jvman_sha256_init(&context);
+    jvman_sha256_update(&context, canonical,
+                        (size_t)canonical_length * sizeof(canonical[0]));
+    jvman_sha256_final(&context, digest);
+    windows_digest_to_wide(digest, digest_text);
+    if (_snwprintf(name, sizeof(name) / sizeof(name[0]),
+                   L"Global\\jvman-update-%ls", digest_text) < 0) {
+        return NULL;
+    }
+    mutex = CreateMutexW(NULL, FALSE, name);
+    if (!mutex) return NULL;
+    wait_result = WaitForSingleObject(mutex, 120000u);
+    if (wait_result != WAIT_OBJECT_0 && wait_result != WAIT_ABANDONED) {
+        CloseHandle(mutex);
+        return NULL;
+    }
+    return mutex;
+}
+
+static void windows_release_update_mutex(HANDLE mutex) {
+    if (!mutex) return;
+    (void)ReleaseMutex(mutex);
+    CloseHandle(mutex);
+}
+
+static int windows_delete_file_by_stream_rename(const WCHAR *path) {
+    WCHAR stream_name[64];
+    FILE_RENAME_INFO *rename_info = NULL;
+    FILE_DISPOSITION_INFO disposition;
+    HANDLE file = INVALID_HANDLE_VALUE;
+    size_t stream_bytes;
+    size_t rename_size;
+    int written;
+    int result = -1;
+    if (!path || !*path) return -1;
+    written = _snwprintf(stream_name,
+                         sizeof(stream_name) / sizeof(stream_name[0]),
+                         L":jvman-delete-%08lx",
+                         (unsigned long)GetCurrentProcessId());
+    if (written <= 0 ||
+        (size_t)written >= sizeof(stream_name) / sizeof(stream_name[0])) {
+        return -1;
+    }
+    stream_bytes = (size_t)written * sizeof(*stream_name);
+    if (stream_bytes > SIZE_MAX - offsetof(FILE_RENAME_INFO, FileName)) {
+        return -1;
+    }
+    rename_size = offsetof(FILE_RENAME_INFO, FileName) + stream_bytes;
+    rename_info = (FILE_RENAME_INFO *)calloc(1u, rename_size);
+    if (!rename_info) return -1;
+    rename_info->ReplaceIfExists = FALSE;
+    rename_info->RootDirectory = NULL;
+    rename_info->FileNameLength = (DWORD)stream_bytes;
+    memcpy(rename_info->FileName, stream_name, stream_bytes);
+    file = CreateFileW(path, DELETE | SYNCHRONIZE,
+                       FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                       NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (file == INVALID_HANDLE_VALUE ||
+        !SetFileInformationByHandle(file, FileRenameInfo, rename_info,
+                                    (DWORD)rename_size)) {
+        goto done;
+    }
+    CloseHandle(file);
+    file = CreateFileW(path, DELETE | SYNCHRONIZE,
+                       FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                       NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (file == INVALID_HANDLE_VALUE) goto done;
+    disposition.DeleteFile = TRUE;
+    if (SetFileInformationByHandle(file, FileDispositionInfo,
+                                   &disposition, sizeof(disposition))) {
+        result = 0;
+    }
+done:
+    if (file != INVALID_HANDLE_VALUE) CloseHandle(file);
+    free(rename_info);
+    return result;
+}
+
+static void windows_delete_running_update_helper(void) {
+    WCHAR module[JVMAN_PATH_MAX];
+    HANDLE file;
+    JvmanFileDispositionInfoEx disposition;
+    if (windows_get_module_path(module,
+                                sizeof(module) / sizeof(module[0])) != 0 ||
+        !windows_update_helper_path_valid(module)) {
+        return;
+    }
+    if (windows_delete_file_by_stream_rename(module) == 0) return;
+    file = CreateFileW(module, DELETE | SYNCHRONIZE,
+                       FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                       NULL, OPEN_EXISTING, FILE_ATTRIBUTE_TEMPORARY, NULL);
+    if (file == INVALID_HANDLE_VALUE) {
+        (void)MoveFileExW(module, NULL, MOVEFILE_DELAY_UNTIL_REBOOT);
+        return;
+    }
+    disposition.flags = JVMAN_FILE_DISPOSITION_FLAG_DELETE |
+                        JVMAN_FILE_DISPOSITION_FLAG_POSIX |
+                        JVMAN_FILE_DISPOSITION_FLAG_IGNORE_READONLY;
+    if (!SetFileInformationByHandle(file,
+                                    JVMAN_FILE_DISPOSITION_INFO_EX_CLASS,
+                                    &disposition, sizeof(disposition))) {
+        (void)MoveFileExW(module, NULL, MOVEFILE_DELAY_UNTIL_REBOOT);
+    }
+    CloseHandle(file);
+}
+
+static int windows_update_stage_path_syntax_valid(const WCHAR *stage,
+                                                  const WCHAR *target) {
+    static const WCHAR marker[] = L".jvman-update-";
+    const WCHAR *cursor;
+    const WCHAR *suffix;
+    size_t target_length;
+    size_t stage_length;
+    if (!stage || !target) return 0;
+    target_length = wcslen(target);
+    stage_length = wcslen(stage);
+    if (target_length == 0 ||
+        stage_length <= target_length + (sizeof(marker) / sizeof(marker[0])) ||
+        _wcsnicmp(stage, target, target_length) != 0 ||
+        _wcsnicmp(stage + target_length, marker,
+                  sizeof(marker) / sizeof(marker[0]) - 1u) != 0 ||
+        stage_length < 4u ||
+        _wcsicmp(stage + stage_length - 4u, L".tmp") != 0) {
+        return 0;
+    }
+    cursor = stage + target_length + sizeof(marker) / sizeof(marker[0]) - 1u;
+    suffix = stage + stage_length - 4u;
+    if (cursor >= suffix) return 0;
+    while (cursor < suffix) {
+        if (!((*cursor >= L'0' && *cursor <= L'9') ||
+              (*cursor >= L'a' && *cursor <= L'f') ||
+              (*cursor >= L'A' && *cursor <= L'F') ||
+              *cursor == L'-')) {
+            return 0;
+        }
+        ++cursor;
+    }
+    return 1;
+}
+
+static int windows_update_stage_path_valid(const WCHAR *stage,
+                                           const WCHAR *target) {
+    return windows_update_stage_path_syntax_valid(stage, target) &&
+           windows_file_is_regular(stage) && windows_file_is_regular(target);
+}
+
+static int windows_update_helper_path_valid(const WCHAR *module) {
+    static const WCHAR prefix[] = L"jvman-update-helper-";
+    WCHAR temporary[JVMAN_PATH_MAX];
+    DWORD length;
+    size_t module_length;
+    const WCHAR *filename;
+    length = GetTempPathW((DWORD)(sizeof(temporary) / sizeof(temporary[0])),
+                          temporary);
+    if (!module || length == 0 ||
+        length >= sizeof(temporary) / sizeof(temporary[0]) ||
+        _wcsnicmp(module, temporary, length) != 0) return 0;
+    filename = module + length;
+    module_length = wcslen(filename);
+    return _wcsnicmp(filename, prefix,
+                     sizeof(prefix) / sizeof(prefix[0]) - 1u) == 0 &&
+           module_length > 4u &&
+           _wcsicmp(filename + module_length - 4u, L".exe") == 0 &&
+           wcschr(filename, L'\\') == NULL && wcschr(filename, L'/') == NULL;
+}
+
+static int windows_copy_update_helper(const WCHAR *module, WCHAR *helper,
+                                      size_t capacity) {
+    WCHAR temporary[JVMAN_PATH_MAX];
+    DWORD length;
+    unsigned int attempt;
+    length = GetTempPathW((DWORD)(sizeof(temporary) / sizeof(temporary[0])),
+                          temporary);
+    if (!module || !helper || capacity == 0 || length == 0 ||
+        length >= sizeof(temporary) / sizeof(temporary[0])) return -1;
+    for (attempt = 0; attempt < 128u; ++attempt) {
+        int written = _snwprintf(
+            helper, capacity,
+            L"%lsjvman-update-helper-%08lx-%08lx-%03u.exe", temporary,
+            (unsigned long)GetCurrentProcessId(),
+            (unsigned long)GetTickCount(), attempt);
+        if (written < 0 || (size_t)written >= capacity) return -1;
+        if (CopyFileW(module, helper, TRUE)) {
+            HANDLE file = CreateFileW(
+                helper, GENERIC_READ | GENERIC_WRITE,
+                FILE_SHARE_READ, NULL, OPEN_EXISTING,
+                FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_OPEN_REPARSE_POINT,
+                NULL);
+            if (file == INVALID_HANDLE_VALUE || !FlushFileBuffers(file)) {
+                if (file != INVALID_HANDLE_VALUE) CloseHandle(file);
+                DeleteFileW(helper);
+                return -1;
+            }
+            CloseHandle(file);
+            return 0;
+        }
+        if (GetLastError() != ERROR_FILE_EXISTS &&
+            GetLastError() != ERROR_ALREADY_EXISTS) return -1;
+    }
+    return -1;
+}
+
+static int windows_start_update_helper(const WCHAR *stage,
+                                       const WCHAR *target,
+                                       const char *new_checksum,
+                                       const char *old_checksum_text) {
+    WCHAR module[JVMAN_PATH_MAX];
+    WCHAR helper[JVMAN_PATH_MAX];
+    WCHAR old_checksum[65];
+    WCHAR new_checksum_w[65];
+    BY_HANDLE_FILE_INFORMATION helper_info;
+    unsigned char helper_digest[32];
+    WCHAR *command = NULL;
+    unsigned char old_digest[32];
+    HANDLE parent = NULL;
+    HANDLE helper_file = INVALID_HANDLE_VALUE;
+    SECURITY_ATTRIBUTES security;
+    STARTUPINFOEXW startup;
+    PROCESS_INFORMATION process;
+    LPPROC_THREAD_ATTRIBUTE_LIST attributes = NULL;
+    SIZE_T attributes_size = 0;
+    HANDLE inherited_handles[2];
+    size_t index;
+    int elevated;
+    int attributes_initialized = 0;
+    int command_length;
+    int result = -1;
+    if (windows_process_is_elevated(&elevated) != 0) {
+        platform_set_windows_error(
+            "cannot inspect the Windows process elevation state");
+        return -1;
+    }
+    if (elevated) {
+        platform_set_error(
+            "Windows self-update must run from a non-elevated terminal");
+        return -1;
+    }
+    if (!stage || !target || !platform_sha256_text_valid(new_checksum) ||
+        !platform_sha256_text_valid(old_checksum_text) ||
+        windows_get_module_path(module,
+                                sizeof(module) / sizeof(module[0])) != 0 ||
+        _wcsicmp(module, target) != 0 ||
+        !windows_update_stage_path_valid(stage, target) ||
+        windows_sha256_file_w(target, old_digest) != 0 ||
+        !jvman_hex_equal(old_digest, sizeof(old_digest), old_checksum_text) ||
+        windows_copy_update_helper(module, helper,
+                                   sizeof(helper) / sizeof(helper[0])) != 0) {
+        platform_set_error("cannot prepare the Windows update helper");
+        return -1;
+    }
+    windows_digest_to_wide(old_digest, old_checksum);
+    for (index = 0; index < 64u; ++index) {
+        new_checksum_w[index] = (WCHAR)(unsigned char)new_checksum[index];
+    }
+    new_checksum_w[64] = L'\0';
+    parent = OpenProcess(SYNCHRONIZE, FALSE, GetCurrentProcessId());
+    if (!parent ||
+        !SetHandleInformation(parent, HANDLE_FLAG_INHERIT,
+                              HANDLE_FLAG_INHERIT)) {
+        if (parent) CloseHandle(parent);
+        DeleteFileW(helper);
+        platform_set_windows_error("cannot create an inherited update handle");
+        return -1;
+    }
+    memset(&security, 0, sizeof(security));
+    security.nLength = sizeof(security);
+    security.bInheritHandle = TRUE;
+    helper_file = CreateFileW(
+        helper, GENERIC_READ,
+        FILE_SHARE_READ,
+        &security, OPEN_EXISTING,
+        FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_SEQUENTIAL_SCAN |
+            FILE_FLAG_OPEN_REPARSE_POINT,
+        NULL);
+    if (helper_file == INVALID_HANDLE_VALUE) {
+        CloseHandle(parent);
+        DeleteFileW(helper);
+        platform_set_windows_error("cannot open the update helper image");
+        return -1;
+    }
+    memset(&helper_info, 0, sizeof(helper_info));
+    if (!GetFileInformationByHandle(helper_file, &helper_info)) {
+        CloseHandle(helper_file);
+        CloseHandle(parent);
+        DeleteFileW(helper);
+        platform_set_windows_error("cannot inspect the update helper image");
+        return -1;
+    }
+    if ((helper_info.dwFileAttributes &
+         (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) != 0 ||
+        helper_info.nNumberOfLinks != 1u ||
+        windows_sha256_handle(helper_file, helper_digest) != 0 ||
+        memcmp(helper_digest, old_digest, sizeof(helper_digest)) != 0) {
+        CloseHandle(helper_file);
+        CloseHandle(parent);
+        DeleteFileW(helper);
+        platform_set_error("update helper image failed final safety checks");
+        return -1;
+    }
+    command = (WCHAR *)calloc(32768u, sizeof(*command));
+    command_length = command ? _snwprintf(
+        command, 32768u,
+        L"\"%ls\" --jvman-internal-apply-update-v1 0x%llx 0x%llx "
+        L"\"%ls\" \"%ls\" %ls %ls",
+        helper, (unsigned long long)(uintptr_t)parent,
+        (unsigned long long)(uintptr_t)helper_file, stage, target,
+        new_checksum_w, old_checksum) : -1;
+    if (!command || command_length < 0 || command_length >= 32768) {
+        free(command);
+        CloseHandle(helper_file);
+        CloseHandle(parent);
+        DeleteFileW(helper);
+        platform_set_error("Windows update helper command is too long");
+        return -1;
+    }
+    memset(&startup, 0, sizeof(startup));
+    startup.StartupInfo.cb = sizeof(startup);
+    memset(&process, 0, sizeof(process));
+    inherited_handles[0] = parent;
+    inherited_handles[1] = helper_file;
+    (void)InitializeProcThreadAttributeList(NULL, 1, 0, &attributes_size);
+    if (attributes_size == 0) {
+        platform_set_windows_error("cannot size the update handle list");
+        goto helper_done;
+    }
+    attributes = (LPPROC_THREAD_ATTRIBUTE_LIST)malloc(attributes_size);
+    if (!attributes) {
+        platform_set_error("out of memory preparing the update helper");
+        goto helper_done;
+    }
+    if (!InitializeProcThreadAttributeList(attributes, 1, 0,
+                                           &attributes_size)) {
+        platform_set_windows_error("cannot initialize the update handle list");
+        goto helper_done;
+    }
+    attributes_initialized = 1;
+    if (!UpdateProcThreadAttribute(
+            attributes, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+            inherited_handles, sizeof(inherited_handles), NULL, NULL)) {
+        platform_set_windows_error("cannot restrict inherited update handles");
+        goto helper_done;
+    }
+    startup.lpAttributeList = attributes;
+    if (CreateProcessW(helper, command, NULL, NULL, TRUE,
+                       CREATE_NO_WINDOW | CREATE_SUSPENDED |
+                           CREATE_UNICODE_ENVIRONMENT |
+                           EXTENDED_STARTUPINFO_PRESENT,
+                       NULL, NULL, &startup.StartupInfo, &process)) {
+        DWORD resume_result;
+        CloseHandle(helper_file);
+        helper_file = INVALID_HANDLE_VALUE;
+        CloseHandle(parent);
+        parent = NULL;
+        resume_result = ResumeThread(process.hThread);
+        if (resume_result == (DWORD)-1) {
+            DWORD resume_error = GetLastError();
+            DWORD stop_error = ERROR_SUCCESS;
+            DWORD stop_wait;
+            if (!TerminateProcess(process.hProcess, 3u)) {
+                stop_error = GetLastError();
+            }
+            stop_wait = WaitForSingleObject(process.hProcess, 5000u);
+            if (stop_wait == WAIT_OBJECT_0) {
+                SetLastError(resume_error);
+                platform_set_windows_error(
+                    "cannot resume the Windows update helper");
+            } else {
+                if (stop_wait == WAIT_TIMEOUT) stop_error = ERROR_TIMEOUT;
+                else if (stop_error == ERROR_SUCCESS) stop_error = GetLastError();
+                SetLastError(stop_error);
+                platform_set_windows_error(
+                    "cannot stop the failed Windows update helper");
+            }
+        } else {
+            result = 0;
+        }
+        CloseHandle(process.hThread);
+        CloseHandle(process.hProcess);
+    } else {
+        platform_set_windows_error("cannot start the Windows update helper");
+    }
+helper_done:
+    if (attributes_initialized) DeleteProcThreadAttributeList(attributes);
+    free(attributes);
+    free(command);
+    if (helper_file != INVALID_HANDLE_VALUE) CloseHandle(helper_file);
+    if (parent) CloseHandle(parent);
+    if (result != 0) DeleteFileW(helper);
+    return result;
+}
+#endif
+
+int platform_stage_executable_update(const char *source, const char *target,
+                                     char *staged_out, size_t staged_size) {
+    if (!source || !target || !staged_out || staged_size == 0) {
+        platform_set_error("invalid executable update staging request");
+        return -1;
+    }
+    staged_out[0] = '\0';
+#if defined(_WIN32)
+    WCHAR *wide_source = NULL;
+    WCHAR *wide_target = NULL;
+    WCHAR stage[JVMAN_PATH_MAX];
+    WCHAR module[JVMAN_PATH_MAX];
+    unsigned int attempt;
+    if (platform_utf8_to_wide(source, &wide_source) != 0 ||
+        platform_utf8_to_wide(target, &wide_target) != 0 ||
+        windows_get_module_path(module,
+                                sizeof(module) / sizeof(module[0])) != 0 ||
+        _wcsicmp(module, wide_target) != 0 ||
+        !windows_file_is_regular(wide_source) ||
+        !windows_file_is_regular(wide_target)) {
+        free(wide_source);
+        free(wide_target);
+        platform_set_error("update source or target is not a regular executable");
+        return -1;
+    }
+    for (attempt = 0; attempt < 128u; ++attempt) {
+        HANDLE file;
+        int written = _snwprintf(
+            stage, sizeof(stage) / sizeof(stage[0]),
+            L"%ls.jvman-update-%08lx-%08lx-%03u.tmp", wide_target,
+            (unsigned long)GetCurrentProcessId(),
+            (unsigned long)GetTickCount(), attempt);
+        if (written < 0 ||
+            (size_t)written >= sizeof(stage) / sizeof(stage[0])) break;
+        if (!CopyFileW(wide_source, stage, TRUE)) {
+            if (GetLastError() == ERROR_FILE_EXISTS ||
+                GetLastError() == ERROR_ALREADY_EXISTS) continue;
+            break;
+        }
+        file = CreateFileW(stage, GENERIC_READ | GENERIC_WRITE,
+                           FILE_SHARE_READ | FILE_SHARE_DELETE, NULL,
+                           OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (file == INVALID_HANDLE_VALUE || !FlushFileBuffers(file)) {
+            if (file != INVALID_HANDLE_VALUE) CloseHandle(file);
+            DeleteFileW(stage);
+            break;
+        }
+        CloseHandle(file);
+        if (platform_copy_wide_to_utf8(stage, staged_out, staged_size) == 0) {
+            free(wide_source);
+            free(wide_target);
+            return 0;
+        }
+        DeleteFileW(stage);
+        break;
+    }
+    free(wide_source);
+    free(wide_target);
+    platform_set_windows_error("cannot create a same-directory update file");
+    return -1;
+#else
+    char current[JVMAN_PATH_MAX];
+    char directory[JVMAN_PATH_MAX];
+    char stage[JVMAN_PATH_MAX];
+    char stage_name[JVMAN_PATH_MAX];
+    const char *target_name = NULL;
+    struct stat source_info;
+    struct stat target_info;
+    int directory_fd = -1;
+    int input = -1;
+    int output = -1;
+    int input_flags = O_RDONLY;
+    unsigned int attempt;
+    int stage_created = 0;
+#ifdef O_NOFOLLOW
+    input_flags |= O_NOFOLLOW;
+#endif
+    if (platform_current_executable(current, sizeof(current)) != 0 ||
+        strcmp(current, target) != 0 ||
+        lstat(source, &source_info) != 0 || !S_ISREG(source_info.st_mode)) {
+        platform_set_error("update source or target failed ownership and file checks");
+        return -1;
+    }
+    directory_fd = posix_open_update_directory(
+        target, directory, sizeof(directory), &target_name);
+    if (directory_fd < 0 ||
+        fstatat(directory_fd, target_name, &target_info,
+                AT_SYMLINK_NOFOLLOW) != 0 ||
+        !S_ISREG(target_info.st_mode) || target_info.st_uid != geteuid() ||
+        target_info.st_nlink != 1 ||
+        (target_info.st_mode &
+         (S_ISUID | S_ISGID | S_IWGRP | S_IWOTH)) != 0) {
+        if (directory_fd >= 0) close(directory_fd);
+        platform_set_error(
+            "update target or its directory failed safety checks");
+        return -1;
+    }
+    input = open(source, input_flags);
+    if (input < 0) {
+        int saved_error = errno;
+        close(directory_fd);
+        platform_set_error("cannot open staged update source: %s",
+                           strerror(saved_error));
+        return -1;
+    }
+    for (attempt = 0; attempt < 128u; ++attempt) {
+        int name_written = snprintf(
+            stage_name, sizeof(stage_name),
+            "%s.jvman-update-%lu-%03u.tmp", target_name,
+            platform_process_id(), attempt);
+        int path_written;
+        if (name_written < 0 ||
+            (size_t)name_written >= sizeof(stage_name)) break;
+        path_written = strcmp(directory, "/") == 0
+                           ? snprintf(stage, sizeof(stage), "%s%s",
+                                      directory, stage_name)
+                           : snprintf(stage, sizeof(stage), "%s/%s",
+                                      directory, stage_name);
+        if (path_written < 0 || (size_t)path_written >= sizeof(stage)) break;
+        output = openat(directory_fd, stage_name,
+                        O_WRONLY | O_CREAT | O_EXCL, 0600);
+        if (output >= 0) {
+            stage_created = 1;
+            break;
+        }
+        if (errno != EEXIST) break;
+    }
+    if (output < 0) {
+        int saved_error = errno;
+        close(input);
+        close(directory_fd);
+        platform_set_error("cannot create a same-directory update file: %s",
+                           strerror(saved_error));
+        return -1;
+    }
+    for (;;) {
+        unsigned char buffer[64u * 1024u];
+        ssize_t count = read(input, buffer, sizeof(buffer));
+        size_t offset = 0;
+        if (count < 0 && errno == EINTR) continue;
+        if (count < 0) goto posix_stage_failure;
+        if (count == 0) break;
+        while (offset < (size_t)count) {
+            ssize_t written = write(output, buffer + offset,
+                                    (size_t)count - offset);
+            if (written < 0 && errno == EINTR) continue;
+            if (written <= 0) goto posix_stage_failure;
+            offset += (size_t)written;
+        }
+    }
+    if (fchmod(output, target_info.st_mode & 0777) != 0 ||
+        fsync(output) != 0) {
+        goto posix_stage_failure;
+    }
+    if (close(output) != 0) {
+        output = -1;
+        goto posix_stage_failure;
+    }
+    output = -1;
+    close(input);
+    if (strlen(stage) + 1u > staged_size) {
+        (void)unlinkat(directory_fd, stage_name, 0);
+        close(directory_fd);
+        platform_set_error("same-directory update path is too long");
+        return -1;
+    }
+    close(directory_fd);
+    directory_fd = -1;
+    strcpy(staged_out, stage);
+    return 0;
+posix_stage_failure:
+    {
+        int saved_error = errno;
+        if (input >= 0) close(input);
+        if (output >= 0) close(output);
+        if (stage_created && directory_fd >= 0) {
+            (void)unlinkat(directory_fd, stage_name, 0);
+        } else if (stage_created) {
+            (void)unlink(stage);
+        }
+        if (directory_fd >= 0) close(directory_fd);
+        platform_set_error("cannot copy executable update: %s",
+                           strerror(saved_error));
+        return -1;
+    }
+#endif
+}
+
+#if defined(_WIN32)
+static int windows_update_worker(int argc, WCHAR **argv) {
+    WCHAR module[JVMAN_PATH_MAX];
+    WCHAR backup[JVMAN_PATH_MAX];
+    BY_HANDLE_FILE_INFORMATION helper_info;
+    BY_HANDLE_FILE_INFORMATION module_info;
+    unsigned char helper_digest[32];
+    unsigned char target_digest[32];
+    unsigned char stage_digest[32];
+    WCHAR *handle_end = NULL;
+    unsigned long long handle_value;
+    HANDLE parent;
+    HANDLE helper_file;
+    HANDLE module_file = INVALID_HANDLE_VALUE;
+    HANDLE update_mutex;
+    DWORD wait_result;
+    DWORD replace_error = ERROR_SUCCESS;
+    unsigned int attempt;
+    int elevated;
+    int replaced = 0;
+    if (!argv || argc != 8 ||
+        wcscmp(argv[1], L"--jvman-internal-apply-update-v1") != 0) {
+        return 2;
+    }
+    errno = 0;
+    handle_value = wcstoull(argv[2], &handle_end, 0);
+    if (errno != 0 || !handle_end || *handle_end != L'\0' ||
+        handle_value == 0 ||
+        handle_value > (unsigned long long)UINTPTR_MAX) {
+        return 2;
+    }
+    parent = (HANDLE)(uintptr_t)handle_value;
+    errno = 0;
+    handle_end = NULL;
+    handle_value = wcstoull(argv[3], &handle_end, 0);
+    if (errno != 0 || !handle_end || *handle_end != L'\0' ||
+        handle_value == 0 ||
+        handle_value > (unsigned long long)UINTPTR_MAX) {
+        CloseHandle(parent);
+        return 2;
+    }
+    helper_file = (HANDLE)(uintptr_t)handle_value;
+    if (!windows_checksum_w_valid(argv[6]) ||
+        !windows_checksum_w_valid(argv[7]) ||
+        windows_get_module_path(module,
+                                sizeof(module) / sizeof(module[0])) != 0 ||
+        !windows_update_helper_path_valid(module) ||
+        !windows_update_stage_path_syntax_valid(argv[4], argv[5])) {
+        CloseHandle(helper_file);
+        CloseHandle(parent);
+        return 2;
+    }
+    if (windows_process_is_elevated(&elevated) != 0 || elevated) {
+        CloseHandle(helper_file);
+        CloseHandle(parent);
+        DeleteFileW(argv[4]);
+        return 3;
+    }
+    module_file = CreateFileW(
+        module, FILE_READ_ATTRIBUTES,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        NULL, OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+    memset(&helper_info, 0, sizeof(helper_info));
+    memset(&module_info, 0, sizeof(module_info));
+    if (module_file == INVALID_HANDLE_VALUE ||
+        !GetFileInformationByHandle(helper_file, &helper_info) ||
+        !GetFileInformationByHandle(module_file, &module_info) ||
+        (helper_info.dwFileAttributes &
+         (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) != 0 ||
+        (module_info.dwFileAttributes &
+         (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) != 0 ||
+        helper_info.nNumberOfLinks != 1u ||
+        module_info.nNumberOfLinks != 1u ||
+        helper_info.dwVolumeSerialNumber != module_info.dwVolumeSerialNumber ||
+        helper_info.nFileIndexHigh != module_info.nFileIndexHigh ||
+        helper_info.nFileIndexLow != module_info.nFileIndexLow) {
+        if (module_file != INVALID_HANDLE_VALUE) CloseHandle(module_file);
+        CloseHandle(helper_file);
+        CloseHandle(parent);
+        DeleteFileW(argv[4]);
+        return 4;
+    }
+    CloseHandle(module_file);
+    wait_result = WaitForSingleObject(parent, 120000u);
+    CloseHandle(parent);
+    if (wait_result != WAIT_OBJECT_0) {
+        CloseHandle(helper_file);
+        DeleteFileW(argv[4]);
+        return 3;
+    }
+    update_mutex = windows_acquire_update_mutex(argv[5]);
+    if (!update_mutex) {
+        CloseHandle(helper_file);
+        DeleteFileW(argv[4]);
+        return 3;
+    }
+
+    /* The helper is an exact copy of the old target.  Binding both hashes
+     * prevents this internal mode from becoming a generic file replacer. */
+    if (!windows_update_stage_path_valid(argv[4], argv[5]) ||
+        windows_sha256_handle(helper_file, helper_digest) != 0 ||
+        windows_sha256_file_w(argv[5], target_digest) != 0 ||
+        !windows_digest_matches_w(helper_digest, argv[7]) ||
+        !windows_digest_matches_w(target_digest, argv[7]) ||
+        windows_sha256_file_w(argv[4], stage_digest) != 0 ||
+        !windows_digest_matches_w(stage_digest, argv[6])) {
+        CloseHandle(helper_file);
+        DeleteFileW(argv[4]);
+        windows_release_update_mutex(update_mutex);
+        return 4;
+    }
+    CloseHandle(helper_file);
+    for (attempt = 0; attempt < 128u; ++attempt) {
+        int written = _snwprintf(
+            backup, sizeof(backup) / sizeof(backup[0]),
+            L"%ls.jvman-backup-%08lx-%03u.tmp", argv[5],
+            (unsigned long)GetCurrentProcessId(), attempt);
+        DWORD attributes;
+        if (written < 0 ||
+            (size_t)written >= sizeof(backup) / sizeof(backup[0])) {
+            DeleteFileW(argv[4]);
+            windows_release_update_mutex(update_mutex);
+            return 5;
+        }
+        attributes = GetFileAttributesW(backup);
+        if (attributes == INVALID_FILE_ATTRIBUTES &&
+            (GetLastError() == ERROR_FILE_NOT_FOUND ||
+             GetLastError() == ERROR_PATH_NOT_FOUND)) break;
+    }
+    if (attempt == 128u) {
+        DeleteFileW(argv[4]);
+        windows_release_update_mutex(update_mutex);
+        return 5;
+    }
+    for (attempt = 0; attempt < 100u; ++attempt) {
+        if (ReplaceFileW(argv[5], argv[4], backup,
+                         REPLACEFILE_WRITE_THROUGH, NULL, NULL)) {
+            replaced = 1;
+            break;
+        }
+        replace_error = GetLastError();
+        if (replace_error != ERROR_SHARING_VIOLATION &&
+            replace_error != ERROR_ACCESS_DENIED) {
+            break;
+        }
+        Sleep(50);
+    }
+    if (!replaced) {
+        int target_is_old = 0;
+        DWORD target_attributes;
+        if (windows_sha256_file_w(argv[5], target_digest) == 0) {
+            if (windows_digest_matches_w(target_digest, argv[6])) {
+                replaced = 1;
+            } else if (windows_digest_matches_w(target_digest, argv[7])) {
+                target_is_old = 1;
+            }
+        }
+        if (!replaced && !target_is_old) {
+            target_attributes = GetFileAttributesW(argv[5]);
+            if (target_attributes == INVALID_FILE_ATTRIBUTES &&
+                (GetLastError() == ERROR_FILE_NOT_FOUND ||
+                 GetLastError() == ERROR_PATH_NOT_FOUND) &&
+                windows_sha256_file_w(backup, stage_digest) == 0 &&
+                windows_digest_matches_w(stage_digest, argv[7]) &&
+                MoveFileExW(backup, argv[5], MOVEFILE_WRITE_THROUGH) &&
+                windows_sha256_file_w(argv[5], target_digest) == 0 &&
+                windows_digest_matches_w(target_digest, argv[7])) {
+                target_is_old = 1;
+            }
+        }
+        if (!replaced) {
+            if (target_is_old) {
+                DeleteFileW(argv[4]);
+                if (windows_sha256_file_w(backup, stage_digest) == 0 &&
+                    windows_digest_matches_w(stage_digest, argv[7])) {
+                    DeleteFileW(backup);
+                }
+            }
+            SetLastError(replace_error);
+            windows_release_update_mutex(update_mutex);
+            return 6;
+        }
+    }
+    if (windows_sha256_file_w(argv[5], target_digest) != 0 ||
+        !windows_digest_matches_w(target_digest, argv[6])) {
+        /* Keep the verified backup unless an atomic same-volume rename can
+         * restore it. A failed recovery must never delete the last old copy. */
+        if (windows_sha256_file_w(backup, stage_digest) != 0 ||
+            !windows_digest_matches_w(stage_digest, argv[7]) ||
+            !MoveFileExW(backup, argv[5],
+                         MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) ||
+            windows_sha256_file_w(argv[5], target_digest) != 0 ||
+            !windows_digest_matches_w(target_digest, argv[7])) {
+            windows_release_update_mutex(update_mutex);
+            return 7;
+        }
+        windows_release_update_mutex(update_mutex);
+        return 7;
+    }
+    DeleteFileW(backup);
+    windows_release_update_mutex(update_mutex);
+    return 0;
+}
+#endif
+
+int platform_publish_executable_update(const char *staged, const char *target,
+                                       const char *expected_sha256,
+                                       const char *expected_current_sha256,
+                                       int *deferred_out) {
+    unsigned char digest[32];
+    if (!staged || !target || !expected_sha256 ||
+        !expected_current_sha256 || !deferred_out ||
+        !platform_sha256_text_valid(expected_sha256) ||
+        !platform_sha256_text_valid(expected_current_sha256)) {
+        platform_set_error("invalid executable update publication request");
+        return -1;
+    }
+    *deferred_out = 0;
+    if (platform_sha256_file(staged, digest) != 0 ||
+        !jvman_hex_equal(digest, sizeof(digest), expected_sha256)) {
+        platform_set_error("staged executable failed final SHA-256 verification");
+        return -1;
+    }
+#if defined(_WIN32)
+    {
+        WCHAR *wide_stage = NULL;
+        WCHAR *wide_target = NULL;
+        int result;
+        if (platform_utf8_to_wide(staged, &wide_stage) != 0 ||
+            platform_utf8_to_wide(target, &wide_target) != 0) {
+            free(wide_stage);
+            free(wide_target);
+            return -1;
+        }
+        result = windows_start_update_helper(
+            wide_stage, wide_target, expected_sha256,
+            expected_current_sha256);
+        free(wide_stage);
+        free(wide_target);
+        if (result != 0) return -1;
+        *deferred_out = 1;
+        return 0;
+    }
+#else
+    {
+        char current[JVMAN_PATH_MAX];
+        char directory[JVMAN_PATH_MAX];
+        const char *stage_name;
+        const char *target_name = NULL;
+        const char *suffix;
+        size_t target_length;
+        size_t staged_length;
+        struct stat target_info;
+        struct stat current_target_info;
+        struct stat locked_target_info;
+        struct stat stage_info;
+        int directory_fd = -1;
+        int target_fd;
+        int target_flags = O_RDONLY;
+#ifdef O_NOFOLLOW
+        target_flags |= O_NOFOLLOW;
+#endif
+        if (platform_current_executable(current, sizeof(current)) != 0 ||
+            strcmp(current, target) != 0) {
+            platform_set_error("update target does not match this process");
+            return -1;
+        }
+        target_length = strlen(target);
+        staged_length = strlen(staged);
+        if (staged_length <= target_length) {
+            platform_set_error("staged update path does not match its target");
+            return -1;
+        }
+        suffix = staged + target_length;
+        if (strncmp(staged, target, target_length) != 0 ||
+            strncmp(suffix, ".jvman-update-", 14u) != 0 ||
+            !jvman_ends_with(suffix, ".tmp") ||
+            strchr(suffix, '/') != NULL) {
+            platform_set_error("staged update path does not match its target");
+            return -1;
+        }
+        stage_name = strrchr(staged, '/');
+        if (!stage_name || stage_name[1] == '\0') {
+            platform_set_error("staged update has no parent directory");
+            return -1;
+        }
+        ++stage_name;
+        directory_fd = posix_open_update_directory(
+            target, directory, sizeof(directory), &target_name);
+        if (directory_fd < 0 ||
+            fstatat(directory_fd, target_name, &target_info,
+                    AT_SYMLINK_NOFOLLOW) != 0 ||
+            fstatat(directory_fd, stage_name, &stage_info,
+                    AT_SYMLINK_NOFOLLOW) != 0 ||
+            !S_ISREG(target_info.st_mode) ||
+            target_info.st_uid != geteuid() || target_info.st_nlink != 1 ||
+            (target_info.st_mode &
+             (S_ISUID | S_ISGID | S_IWGRP | S_IWOTH)) != 0 ||
+            !S_ISREG(stage_info.st_mode) ||
+            stage_info.st_uid != geteuid() || stage_info.st_nlink != 1 ||
+            (stage_info.st_mode &
+             (S_ISUID | S_ISGID | S_IWGRP | S_IWOTH)) != 0) {
+            if (directory_fd >= 0) close(directory_fd);
+            platform_set_error("update files failed final safety checks");
+            return -1;
+        }
+        target_fd = openat(directory_fd, target_name, target_flags);
+        if (target_fd < 0) {
+            close(directory_fd);
+            platform_set_error("cannot open the update target: %s",
+                               strerror(errno));
+            return -1;
+        }
+        if (posix_lock_update_target(target_fd) != 0) {
+            int saved_error = errno;
+            close(target_fd);
+            close(directory_fd);
+            platform_set_error("cannot lock the update target: %s",
+                               strerror(saved_error));
+            return -1;
+        }
+        if (fstat(target_fd, &locked_target_info) != 0 ||
+            fstatat(directory_fd, target_name, &current_target_info,
+                    AT_SYMLINK_NOFOLLOW) != 0 ||
+            !S_ISREG(locked_target_info.st_mode) ||
+            locked_target_info.st_uid != geteuid() ||
+            locked_target_info.st_nlink != 1 ||
+            (locked_target_info.st_mode &
+             (S_ISUID | S_ISGID | S_IWGRP | S_IWOTH)) != 0 ||
+            locked_target_info.st_dev != current_target_info.st_dev ||
+            locked_target_info.st_ino != current_target_info.st_ino ||
+            posix_sha256_fd(target_fd, digest) != 0 ||
+            !jvman_hex_equal(digest, sizeof(digest),
+                             expected_current_sha256)) {
+            close(target_fd);
+            close(directory_fd);
+            platform_set_error(
+                "running executable changed while the update was prepared");
+            return -1;
+        }
+        if (renameat(directory_fd, stage_name,
+                     directory_fd, target_name) != 0) {
+            int saved_error = errno;
+            close(target_fd);
+            close(directory_fd);
+            platform_set_error("cannot atomically publish executable update: %s",
+                               strerror(saved_error));
+            return -1;
+        }
+        if (fsync(directory_fd) != 0) {
+            int saved_error = errno;
+            if (saved_error != EINVAL
+#ifdef ENOTSUP
+                && saved_error != ENOTSUP
+#endif
+#ifdef EOPNOTSUPP
+                && saved_error != EOPNOTSUPP
+#endif
+            ) {
+                close(target_fd);
+                close(directory_fd);
+                platform_set_error(
+                    "executable was replaced, but directory persistence could not be confirmed: %s",
+                    strerror(saved_error));
+                return -1;
+            }
+        }
+        close(target_fd);
+        close(directory_fd);
+        return 0;
+    }
+#endif
+}
+
+int platform_handle_update_helper(int argc, char **argv, int *handled_out) {
+    if (!handled_out) return 2;
+    *handled_out = 0;
+#if defined(_WIN32)
+    {
+        int wide_argc = 0;
+        WCHAR **wide_argv = CommandLineToArgvW(GetCommandLineW(), &wide_argc);
+        int result;
+        (void)argc;
+        (void)argv;
+        if (!wide_argv) {
+            platform_set_windows_error("cannot parse the Windows command line");
+            return 2;
+        }
+        if (wide_argc < 2 ||
+            wcscmp(wide_argv[1],
+                   L"--jvman-internal-apply-update-v1") != 0) {
+            LocalFree(wide_argv);
+            return 0;
+        }
+        *handled_out = 1;
+        result = windows_update_worker(wide_argc, wide_argv);
+        windows_delete_running_update_helper();
+        LocalFree(wide_argv);
+        return result;
+    }
+#else
+    if (argc >= 2 && argv &&
+        strcmp(argv[1], "--jvman-internal-apply-update-v1") == 0) {
+        *handled_out = 1;
+        return 2;
+    }
+    return 0;
 #endif
 }

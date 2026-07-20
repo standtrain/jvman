@@ -8,6 +8,7 @@
 #include "common.h"
 #include "environment.h"
 #include "files.h"
+#include "lang.h"
 
 #include <windows.h>
 #include <shellapi.h>
@@ -165,11 +166,12 @@ static int installer_parse_value(const wchar_t *argument, const wchar_t *name,
 static int installer_parse_options(int argc, wchar_t **argv,
                                    InstallerOptions *options) {
     int index;
-    if (!options || argc < 1 || argc > INSTALLER_MAX_ARGS || !argv) return -1;
+    if (!options) return -1;
     memset(options, 0, sizeof(*options));
     options->add_path = 1;
     options->path_scope = JVMAN_ENV_SCOPE_USER;
     options->configure_java = 0;
+    if (argc < 1 || argc > INSTALLER_MAX_ARGS || !argv) return -1;
     for (index = 1; index < argc; ++index) {
         const wchar_t *argument = argv[index];
         wchar_t value[JVMAN_INSTALL_PATH_CHARS];
@@ -285,21 +287,8 @@ static int installer_parse_options(int argc, wchar_t **argv,
 
 static void installer_show_usage(void) {
     MessageBoxW(NULL,
-        L"jvman setup\n\n"
-        L"Options:\n"
-        L"  /S, /SILENT, or /QUIET       silent install\n"
-        L"  /DIR=<path>                  choose install directory\n"
-        L"  /ADD_TO_PATH                 add the program directory to user PATH\n"
-        L"  /USER_PATH                   add PATH entries for current user\n"
-        L"  /SYSTEM_PATH                 add PATH entries for all users\n"
-        L"  /NO_PATH                     do not modify PATH\n"
-        L"  /CONFIGURE_JAVA              configure JAVA_HOME/current\n"
-        L"  /NO_CONFIGURE_JAVA           leave Java environment unchanged\n"
-        L"  /REPLACE_JAVA_HOME          allow replacing user JAVA_HOME\n"
-        L"  /DISCOVER                    register discovered JDKs after install\n"
-        L"  /PORTABLE /DIR=<path>        extract only jvman.exe\n"
-        L"  /UNINSTALL                   remove this installation",
-        L"jvman Setup", MB_OK | MB_ICONINFORMATION);
+        jvman_lang_str(JVMAN_STR_USAGE),
+        jvman_lang_str(JVMAN_STR_APP_TITLE), MB_OK | MB_ICONINFORMATION);
 }
 
 static int installer_current_jdk(const JvmanInstallPaths *paths) {
@@ -927,7 +916,7 @@ static int installer_install(const InstallerOptions *options) {
     jvman_installer_metadata_init(&metadata);
     memset(&payload, 0, sizeof(payload));
     if (jvman_install_paths_default(&paths) != JVMAN_INSTALL_OK) {
-        return installer_report(L"jvman Setup", L"Cannot determine the default install paths.",
+        return installer_report(jvman_lang_str(JVMAN_STR_APP_TITLE), jvman_lang_str(JVMAN_STR_CANNOT_DETERMINE_PATHS),
                                  MB_OK | MB_ICONERROR, options->silent);
     }
     installer_copy(default_install, sizeof(default_install) / sizeof(*default_install),
@@ -938,8 +927,8 @@ static int installer_install(const InstallerOptions *options) {
         env_status = jvman_installer_metadata_load(&metadata, &found);
         if (env_status != JVMAN_ENV_OK && env_status != JVMAN_ENV_NOT_FOUND) {
             jvman_installer_metadata_free(&metadata);
-            return installer_report_status(L"jvman Setup", L"Cannot read installer state.",
-                                           jvman_environment_status_message(env_status),
+            return installer_report_status(jvman_lang_str(JVMAN_STR_APP_TITLE), jvman_lang_str(JVMAN_STR_CANNOT_READ_STATE),
+                                           jvman_lang_environment_status(env_status),
                                            options->silent);
         }
         if (found) {
@@ -953,8 +942,8 @@ static int installer_install(const InstallerOptions *options) {
             if (recorded_status != JVMAN_INSTALL_OK) {
                 jvman_installer_metadata_free(&metadata);
                 return installer_report_status(
-                    L"jvman Setup", L"The existing installation paths are invalid.",
-                    jvman_install_status_message(recorded_status), options->silent);
+                    jvman_lang_str(JVMAN_STR_APP_TITLE), jvman_lang_str(JVMAN_STR_EXISTING_PATHS_INVALID),
+                    jvman_lang_install_status(recorded_status), options->silent);
             }
             /* A repeat install follows the recorded paths, including a custom
              * data home.  An explicit directory is accepted only when it
@@ -969,8 +958,8 @@ static int installer_install(const InstallerOptions *options) {
                     _wcsicmp(paths.install_dir, recorded_paths.install_dir) != 0) {
                     jvman_installer_metadata_free(&metadata);
                     return installer_report(
-                        L"jvman Setup",
-                        L"The selected install directory does not match the existing installation.",
+                        jvman_lang_str(JVMAN_STR_APP_TITLE),
+                        jvman_lang_str(JVMAN_STR_DIR_MISMATCH),
                         MB_OK | MB_ICONERROR, options->silent);
                 }
             } else {
@@ -981,8 +970,8 @@ static int installer_install(const InstallerOptions *options) {
                     sizeof(marker_id) / sizeof(*marker_id)) != JVMAN_INSTALL_OK ||
                 _wcsicmp(marker_id, metadata.install_id) != 0) {
                 jvman_installer_metadata_free(&metadata);
-                return installer_report(L"jvman Setup",
-                    L"The existing installation state does not match this directory.",
+                return installer_report(jvman_lang_str(JVMAN_STR_APP_TITLE),
+                    jvman_lang_str(JVMAN_STR_STATE_MISMATCH),
                     MB_OK | MB_ICONERROR, options->silent);
             }
         } else {
@@ -994,13 +983,13 @@ static int installer_install(const InstallerOptions *options) {
                     JVMAN_INSTALL_OK) {
                     jvman_installer_metadata_free(&metadata);
                     return installer_report(
-                        L"jvman Setup", L"The selected install directory is not safe.",
+                        jvman_lang_str(JVMAN_STR_APP_TITLE), jvman_lang_str(JVMAN_STR_DIR_NOT_SAFE),
                         MB_OK | MB_ICONERROR, options->silent);
                 }
             }
             if (installer_set_metadata_defaults(&metadata, &paths, 0) != 0) {
                 jvman_installer_metadata_free(&metadata);
-                return installer_report(L"jvman Setup", L"Not enough memory for installer state.",
+                return installer_report(jvman_lang_str(JVMAN_STR_APP_TITLE), jvman_lang_str(JVMAN_STR_NO_MEMORY),
                                          MB_OK | MB_ICONERROR, options->silent);
             }
         }
@@ -1010,15 +999,15 @@ static int installer_install(const InstallerOptions *options) {
         if (jvman_install_paths_init(&paths, default_install, default_data) !=
             JVMAN_INSTALL_OK) {
             jvman_installer_metadata_free(&metadata);
-            return installer_report(L"jvman Setup", L"The selected install directory is not safe.",
+            return installer_report(jvman_lang_str(JVMAN_STR_APP_TITLE), jvman_lang_str(JVMAN_STR_DIR_NOT_SAFE),
                                      MB_OK | MB_ICONERROR, options->silent);
         }
     }
     install_status = jvman_install_paths_create(&paths);
     if (install_status != JVMAN_INSTALL_OK) {
         jvman_installer_metadata_free(&metadata);
-        return installer_report_status(L"jvman Setup", L"Cannot create the install directory.",
-                                       jvman_install_status_message(install_status),
+        return installer_report_status(jvman_lang_str(JVMAN_STR_APP_TITLE), jvman_lang_str(JVMAN_STR_CANNOT_CREATE_DIR),
+                                       jvman_lang_install_status(install_status),
                                        options->silent);
     }
     install_status = jvman_setup_payload_open(NULL, &payload);
@@ -1095,9 +1084,8 @@ static int installer_install(const InstallerOptions *options) {
         if (options->discover && installer_run_discover(&paths) != 0) {
             if (!options->silent) {
                 MessageBoxW(NULL,
-                    L"jvman was installed, but automatic JDK discovery failed.\n"
-                    L"You can run `jvman discover --register` later.",
-                    L"jvman Setup", MB_OK | MB_ICONWARNING);
+                    jvman_lang_str(JVMAN_STR_DISCOVER_FAILED_DETAIL),
+                    jvman_lang_str(JVMAN_STR_DISCOVER_FAILED_TITLE), MB_OK | MB_ICONWARNING);
             }
             result = 2;
         }
@@ -1109,15 +1097,15 @@ static int installer_install(const InstallerOptions *options) {
 environment_failure:
     free(old_java_home_value);
     jvman_installer_metadata_free(&metadata);
-    return installer_report_status(L"jvman Setup", L"Cannot update the Windows environment.",
-                                   jvman_environment_status_message(env_status),
+    return installer_report_status(jvman_lang_str(JVMAN_STR_APP_TITLE), jvman_lang_str(JVMAN_STR_CANNOT_UPDATE_ENV),
+                                   jvman_lang_environment_status(env_status),
                                    options->silent);
 
 install_failure:
     jvman_setup_payload_close(&payload);
     jvman_installer_metadata_free(&metadata);
-    return installer_report_status(L"jvman Setup", L"Cannot install jvman.",
-                                   jvman_install_status_message(install_status),
+    return installer_report_status(jvman_lang_str(JVMAN_STR_APP_TITLE), jvman_lang_str(JVMAN_STR_CANNOT_INSTALL),
+                                   jvman_lang_install_status(install_status),
                                    options->silent);
 }
 
@@ -1143,12 +1131,12 @@ static int installer_uninstall(const InstallerOptions *options) {
         jvman_install_marker_read(&paths, marker, sizeof(marker) / sizeof(*marker)) !=
             JVMAN_INSTALL_OK || _wcsicmp(marker, metadata.install_id) != 0) {
         jvman_installer_metadata_free(&metadata);
-        return installer_report(L"jvman Setup", L"The installation record is missing or invalid.",
+        return installer_report(jvman_lang_str(JVMAN_STR_APP_TITLE), jvman_lang_str(JVMAN_STR_UNINSTALL_RECORD_INVALID),
                                  MB_OK | MB_ICONERROR, options->silent);
     }
     if (!options->silent && MessageBoxW(NULL,
-            L"Remove jvman from this computer?\n\nInstalled JDKs and jvman data will be kept.",
-            L"jvman Setup", MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) != IDYES) {
+            jvman_lang_str(JVMAN_STR_UNINSTALL_CONFIRM),
+            jvman_lang_str(JVMAN_STR_APP_TITLE), MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) != IDYES) {
         jvman_installer_metadata_free(&metadata);
         return 0;
     }
@@ -1212,9 +1200,9 @@ static int installer_uninstall(const InstallerOptions *options) {
         if (changed) (void)jvman_environment_broadcast_change();
         jvman_installer_metadata_free(&metadata);
         return installer_report_status(
-            L"jvman Setup",
-            L"Cannot fully restore the Windows environment. The installation was kept so you can retry.",
-            jvman_environment_status_message(first_environment_error),
+            jvman_lang_str(JVMAN_STR_APP_TITLE),
+            jvman_lang_str(JVMAN_STR_UNINSTALL_ENV_FAILED),
+            jvman_lang_environment_status(first_environment_error),
             options->silent);
     }
 
@@ -1230,9 +1218,9 @@ static int installer_uninstall(const InstallerOptions *options) {
     if (install_status != JVMAN_INSTALL_OK && install_status != JVMAN_INSTALL_NOT_FOUND) {
         jvman_installer_metadata_free(&metadata);
         return installer_report_status(
-            L"jvman Setup",
-            L"Cannot remove the installed files. The installation record was kept so you can retry.",
-            jvman_install_status_message(install_status),
+            jvman_lang_str(JVMAN_STR_APP_TITLE),
+            jvman_lang_str(JVMAN_STR_UNINSTALL_FILES_FAILED),
+            jvman_lang_install_status(install_status),
             options->silent);
     }
     env_status = jvman_arp_delete();
@@ -1247,9 +1235,9 @@ static int installer_uninstall(const InstallerOptions *options) {
     jvman_installer_metadata_free(&metadata);
     if (!options->silent) {
         MessageBoxW(NULL,
-            result == 0 ? L"jvman was removed. Existing JDKs and data were kept."
-                        : L"jvman was partly removed. Restart Windows if the uninstaller is still present.",
-            L"jvman Setup", MB_OK | (result == 0 ? MB_ICONINFORMATION : MB_ICONWARNING));
+            result == 0 ? jvman_lang_str(JVMAN_STR_UNINSTALL_SUCCESS)
+                        : jvman_lang_str(JVMAN_STR_UNINSTALL_PARTIAL),
+            jvman_lang_str(JVMAN_STR_APP_TITLE), MB_OK | (result == 0 ? MB_ICONINFORMATION : MB_ICONWARNING));
     }
     return result;
 }
@@ -1261,7 +1249,7 @@ static int installer_browse_directory(wchar_t *out, size_t capacity) {
     if (!out || capacity == 0) return -1;
     memset(&browse, 0, sizeof(browse));
     browse.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
-    browse.lpszTitle = L"Choose the jvman install directory";
+    browse.lpszTitle = jvman_lang_str(JVMAN_STR_BROWSE_TITLE);
     item = SHBrowseForFolderW(&browse);
     if (item) {
         if (SHGetPathFromIDListW(item, out) && wcslen(out) < capacity) result = 0;
@@ -1297,10 +1285,8 @@ static int installer_prepare_gui_options(InstallerOptions *options) {
                        paths.install_dir);
     }
     answer = MessageBoxW(NULL,
-        L"Install jvman for the current Windows user?\n\n"
-        L"The default PATH option changes only your user environment.\n"
-        L"System PATH can be selected later and requires administrator permission.",
-        L"jvman Setup", MB_YESNOCANCEL | MB_ICONQUESTION | MB_DEFBUTTON1);
+        jvman_lang_str(JVMAN_STR_INSTALL_PROMPT),
+        jvman_lang_str(JVMAN_STR_APP_TITLE), MB_YESNOCANCEL | MB_ICONQUESTION | MB_DEFBUTTON1);
     if (answer == IDCANCEL) {
         jvman_installer_metadata_free(&metadata);
         return 1;
@@ -1314,16 +1300,13 @@ static int installer_prepare_gui_options(InstallerOptions *options) {
         options->install_dir_set = 1;
     }
     answer = MessageBoxW(NULL,
-        L"Add jvman to PATH?\n\n"
-        L"Existing PATH entries are kept and duplicates are skipped.",
-        L"jvman Setup", MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON1);
+        jvman_lang_str(JVMAN_STR_ADD_PATH_PROMPT),
+        jvman_lang_str(JVMAN_STR_APP_TITLE), MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON1);
     options->add_path = answer == IDYES;
     if (options->add_path) {
         answer = MessageBoxW(NULL,
-            L"Add PATH entries for all users?\n\n"
-            L"Choose Yes for the system PATH. Choose No for only your user PATH.\n"
-            L"System PATH requires running this installer as administrator.",
-            L"jvman Setup", MB_YESNOCANCEL | MB_ICONQUESTION | MB_DEFBUTTON2);
+            jvman_lang_str(JVMAN_STR_PATH_SCOPE_PROMPT),
+            jvman_lang_str(JVMAN_STR_APP_TITLE), MB_YESNOCANCEL | MB_ICONQUESTION | MB_DEFBUTTON2);
         if (answer == IDCANCEL) {
             jvman_installer_metadata_free(&metadata);
             return 1;
@@ -1335,20 +1318,18 @@ static int installer_prepare_gui_options(InstallerOptions *options) {
     if (jvman_install_paths_init(&paths, options->install_dir, paths.data_home) ==
         JVMAN_INSTALL_OK && installer_current_jdk(&paths)) {
         answer = MessageBoxW(NULL,
-            L"A valid jvman current JDK exists. Configure JAVA_HOME and current\\bin?\n\n"
-            L"This may replace the current user JAVA_HOME value.",
-            L"jvman Setup", MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2);
+            jvman_lang_str(JVMAN_STR_CONFIGURE_JAVA_PROMPT),
+            jvman_lang_str(JVMAN_STR_APP_TITLE), MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2);
         options->configure_java = answer == IDYES;
         options->replace_java_home = options->configure_java;
     }
     answer = MessageBoxW(NULL,
-        L"Discover and register installed JDKs after installation?\n\n"
-        L"JREs are never registered and the current version is not changed.",
-        L"jvman Setup", MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2);
+        jvman_lang_str(JVMAN_STR_DISCOVER_PROMPT),
+        jvman_lang_str(JVMAN_STR_APP_TITLE), MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2);
     options->discover = answer == IDYES;
     jvman_installer_metadata_free(&metadata);
     if (installer_format(message, sizeof(message) / sizeof(*message),
-                         L"Install location:\n%s", options->install_dir) != 0) return -1;
+                         jvman_lang_str(JVMAN_STR_INSTALL_LOCATION), options->install_dir) != 0) return -1;
     (void)message;
     return 0;
 }
@@ -1362,35 +1343,40 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous,
     int already_running;
     int parse_result;
     int result;
+    HRESULT com_status;
+    int com_initialized;
     (void)instance;
     (void)previous;
     (void)command_line;
     (void)show_command;
-    CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
+    jvman_lang_use_system_default();
+    com_status = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
+    com_initialized = SUCCEEDED(com_status);
     argv = CommandLineToArgvW(GetCommandLineW(), &argc);
     if (!argv) {
-        CoUninitialize();
+        if (com_initialized) CoUninitialize();
         return 2;
     }
     if (argc > 1 && installer_is_switch(argv[1], L"/CLEANUP")) {
         result = installer_cleanup_worker(argc, argv);
         LocalFree(argv);
-        CoUninitialize();
+        if (com_initialized) CoUninitialize();
         return result;
     }
     parse_result = installer_parse_options(argc, argv, &options);
     if (parse_result == 1) {
+        if (!options.silent) (void)jvman_lang_select_dialog();
         installer_show_usage();
         LocalFree(argv);
-        CoUninitialize();
+        if (com_initialized) CoUninitialize();
         return 0;
     }
     if (parse_result != 0) {
-        installer_report(L"jvman Setup",
-                         L"Invalid or conflicting installer arguments.",
+        installer_report(jvman_lang_str(JVMAN_STR_APP_TITLE),
+                         jvman_lang_str(JVMAN_STR_INVALID_ARGS),
                          MB_OK | MB_ICONERROR, 0);
         LocalFree(argv);
-        CoUninitialize();
+        if (com_initialized) CoUninitialize();
         return 2;
     }
     /* Serialize file and registry changes. The cleanup worker is excluded
@@ -1399,27 +1385,27 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous,
     if (!instance_mutex) {
         if (already_running) {
             installer_report(
-                L"jvman Setup",
-                L"Another jvman Setup instance is already running.\n\n"
-                L"jvman \u5b89\u88c5\u7a0b\u5e8f\u5df2\u5728\u8fd0\u884c\u3002",
+                jvman_lang_str(JVMAN_STR_APP_TITLE),
+                jvman_lang_str(JVMAN_STR_ALREADY_RUNNING),
                 MB_OK | MB_ICONINFORMATION, options.silent);
         } else {
             installer_report(
-                L"jvman Setup",
-                L"Cannot create the installer instance lock.",
+                jvman_lang_str(JVMAN_STR_APP_TITLE),
+                jvman_lang_str(JVMAN_STR_CANNOT_CREATE_INSTANCE_LOCK),
                 MB_OK | MB_ICONERROR, options.silent);
         }
         LocalFree(argv);
-        CoUninitialize();
+        if (com_initialized) CoUninitialize();
         return already_running ? INSTALLER_ALREADY_RUNNING_EXIT : 2;
     }
+    if (!options.silent) (void)jvman_lang_select_dialog();
     if (!options.silent && !options.uninstall && !options.portable) {
         parse_result = installer_prepare_gui_options(&options);
         if (parse_result != 0) {
             ReleaseMutex(instance_mutex);
             CloseHandle(instance_mutex);
             LocalFree(argv);
-            CoUninitialize();
+            if (com_initialized) CoUninitialize();
             return parse_result == 1 ? 0 : 1;
         }
     }
@@ -1430,14 +1416,14 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous,
         if (result == 0 && !options.silent) {
             MessageBoxW(NULL,
                 options.add_path
-                    ? L"jvman was installed. Open a new terminal before using the updated PATH."
-                    : L"jvman was installed.",
-                L"jvman Setup", MB_OK | MB_ICONINFORMATION);
+                    ? jvman_lang_str(JVMAN_STR_INSTALL_SUCCESS_PATH)
+                    : jvman_lang_str(JVMAN_STR_INSTALL_SUCCESS),
+                jvman_lang_str(JVMAN_STR_APP_TITLE), MB_OK | MB_ICONINFORMATION);
         }
     }
     ReleaseMutex(instance_mutex);
     CloseHandle(instance_mutex);
     LocalFree(argv);
-    CoUninitialize();
+    if (com_initialized) CoUninitialize();
     return result;
 }

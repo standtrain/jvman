@@ -37,6 +37,22 @@ int platform_is_directory_link(const char *path);
 int platform_spawn_wait(char *const argv[]);
 int platform_find_executable(const char *name, char *out, size_t out_size);
 int platform_find_trusted_executable(const char *name, char *out, size_t out_size);
+int platform_create_temporary_file(char *out, size_t out_size);
+int platform_read_file_limited(const char *path, size_t limit,
+                               char **data_out, size_t *size_out);
+int platform_https_download(const char *url, const char *destination,
+                            size_t limit, int show_progress);
+int platform_current_executable(char *out, size_t out_size);
+int platform_sha256_file(const char *path, unsigned char digest[32]);
+int platform_validate_executable_image(const char *path);
+int platform_stage_executable_update(const char *source, const char *target,
+                                     char *staged_out, size_t staged_size);
+int platform_publish_executable_update(const char *staged, const char *target,
+                                       const char *expected_sha256,
+                                       const char *expected_current_sha256,
+                                       int *deferred_out);
+/* Called before normal CLI initialization; handled_out is set for helper mode. */
+int platform_handle_update_helper(int argc, char **argv, int *handled_out);
 int platform_set_environment(const char *name, const char *value);
 int platform_prepend_path(const char *directory);
 const char *platform_os_name(void);

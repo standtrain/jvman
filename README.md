@@ -28,6 +28,7 @@ after an explicit choice.
 - Switch through one stable `current` path.
 - Run a command with a selected JDK without changing global state.
 - Diagnose `JAVA_HOME`, `PATH`, downloader, and extractor configuration.
+- Update the CLI from verified assets in this project's GitHub Releases.
 
 ## Build
 
@@ -75,6 +76,10 @@ are:
 | Program files | `%LOCALAPPDATA%\Programs\jvman` |
 | jvman data | `%LOCALAPPDATA%\jvman` (or a valid `JVMAN_HOME`) |
 | Registry state | `HKCU\Software\jvman\Installer` |
+
+Interactive runs begin with a language dropdown populated from the installer's
+built-in language table. The Windows UI language selects the initial option;
+canceling the dialog keeps that default.
 
 When started without switches, the installer asks whether to add the program
 directory to `PATH`, whether those PATH entries should be written for only the
@@ -174,6 +179,7 @@ jvman remove <name>
 jvman exec <name> [--] <command> [args...]
 jvman init [powershell|cmd|sh]
 jvman doctor
+jvman update [--check] [--version <version>]
 jvman home
 ```
 
@@ -193,6 +199,44 @@ jvman exec 17 -- java -version
 jvman exec 8 -- mvn test
 jvman install company-jdk --archive .\jdk.zip --sha256 <64-hex-digits>
 ```
+
+## Updating jvman
+
+```text
+jvman update --check
+jvman update
+jvman update --version 0.3.0
+```
+
+Without `--version`, the command checks the latest stable release of
+`github.com/standtrain/jvman`. When a newer version is found, `--check` verifies
+the matching checksum entry but does not download or replace the executable.
+An explicit version skips latest-release metadata lookup and must be
+`MAJOR.MINOR.PATCH` (an optional leading `v` is accepted); downgrades are
+refused.
+
+The updater selects a fixed asset name for Windows x86_64, static Linux x86_64,
+or macOS 11+ x86_64/aarch64. It downloads only through HTTPS, caps metadata and
+binary sizes, matches the binary against the release's `SHA256SUMS`, and checks
+the PE, ELF, or Mach-O architecture before publishing it. Linux and macOS
+require curl 7.20.2 or newer in a fixed, root-owned system directory; a `curl`
+found only in a custom `PATH` is deliberately ignored. macOS 11's system curl
+meets this requirement. Temporary files use restricted permissions, and
+completed success or failure paths make a best-effort cleanup. Windows can
+leave a helper in the user temp directory until the next restart when immediate
+self-deletion is unavailable; manual cleanup may be needed if deletion cannot
+be deferred. The checksum detects corruption and mismatched assets, but because
+it is published in the same GitHub Release, it is not an independent signature.
+
+On Windows, replacement finishes in a restricted helper after the running
+process exits. Self-update must run from a non-elevated terminal so the
+user-writable temporary directory never becomes a privilege boundary. Use the
+installer or replace the binary manually when administrator access is required,
+then run `jvman version` to confirm the result. On Linux and macOS, replacement
+is atomic before the command returns. The executable's directory must be
+writable by the current user. Updating replaces only the running CLI:
+it does not modify `JVMAN_HOME`, installed JDKs, `PATH`, `JAVA_HOME`, shell
+profiles, or Windows installer state.
 
 ## Discovering Installed Java
 
@@ -286,8 +330,8 @@ No source code is copied from those projects.
 Version `0.2.0` installs Temurin through either the Adoptium or Foojay catalog
 and accepts a Java major version for remote installs. Local discovery recognizes
 common JDK vendors, but multi-vendor JDK selection, managed JREs, EA builds, semantic
-version ranges, project `.java-version` files, self-update, and machine-wide
-environment changes are intentionally deferred.
+version ranges, project `.java-version` files, signed release manifests, and
+automatic CLI edits to persistent environment settings are intentionally deferred.
 
 The native Windows build targets Windows 10 version 1903 or later. Its embedded
 UTF-8 code-page manifest allows non-ASCII data and JDK paths without requiring

@@ -18,6 +18,7 @@
 - 通过稳定的 `current` 路径切换版本。
 - 用指定 JDK 运行单条命令，不修改全局选择。
 - 检查 `JAVA_HOME`、`PATH`、下载器、解压器和当前 junction 状态。
+- 从本项目 GitHub Releases 中经过校验的产物更新 jvman 命令行。
 
 ## 构建
 
@@ -49,13 +50,16 @@ mingw32-make.exe
 
 ## Windows 安装程序
 
-`jvman-setup.exe` 是原生 Win32、仅面向当前用户的安装程序，不请求管理员权限，也不写入机器级设置。默认位置如下：
+`jvman-setup.exe` 是原生 Win32 安装程序，程序文件和安装器状态默认按当前用户管理，不请求管理员权限；只有用户显式选择系统 `PATH` 时才会写入机器级设置并要求管理员权限。默认位置如下：
 
 | 项目 | 默认位置 |
 | --- | --- |
 | 程序文件 | `%LOCALAPPDATA%\Programs\jvman` |
 | jvman 数据 | `%LOCALAPPDATA%\jvman`（或有效的 `JVMAN_HOME`） |
 | 安装器状态 | `HKCU\Software\jvman\Installer` |
+
+非静默运行会先显示由安装器内置语言表动态生成的语言下拉框。
+初始项跟随 Windows 界面语言；取消选择时保留该默认语言。
 
 不带参数启动时，安装器会依次询问是否把程序目录加入 `PATH`、PATH 项写入“仅当前用户”还是“所有用户”、是否用有效的 `current` JDK 配置 `JAVA_HOME` 与 `current\bin`，以及是否在安装后执行 `jvman discover --register`。已有 `PATH` 项会保留，精确或规范化后的重复项不会再次加入；写入系统 `PATH` 需要以管理员身份运行安装器。
 
@@ -129,6 +133,7 @@ jvman remove <名称>
 jvman exec <名称> [--] <命令> [参数...]
 jvman init [powershell|cmd|sh]
 jvman doctor
+jvman update [--check] [--version <版本>]
 jvman home
 ```
 
@@ -148,6 +153,38 @@ jvman install company-jdk --archive .\jdk.zip --sha256 <64位十六进制值>
 ```
 
 Windows 下 `exec` 支持从 `PATH/PATHEXT` 解析 `.exe`、`.com`、`.cmd` 和 `.bat`，因此 Maven 的 `mvn.cmd` 可以直接使用。
+
+## 更新 jvman
+
+```text
+jvman update --check
+jvman update
+jvman update --version 0.3.0
+```
+
+不指定 `--version` 时，命令会检查 `github.com/standtrain/jvman` 的最新稳定
+Release。发现较新版本时，`--check` 会验证对应平台的校验项，但不会下载或
+替换可执行文件。显式版本会跳过最新 Release 元数据查询，且必须是
+`MAJOR.MINOR.PATCH`，可带前导 `v`；不允许降级。
+
+更新器只会选择固定名称的 Windows x86_64、静态 Linux x86_64 或 macOS 11+
+x86_64/aarch64 产物。下载仅使用 HTTPS，并限制元数据和二进制大小；二进制
+必须匹配 Release 中的 `SHA256SUMS`，且 PE、ELF 或 Mach-O 格式及架构必须
+与当前平台一致。Linux 和 macOS 要求 curl 7.20.2 或更高版本位于由 root
+拥有的固定系统目录中，仅存在于自定义 `PATH` 的 `curl` 会被忽略；macOS 11
+自带的系统 curl 满足要求。临时文件使用受限权限，正常完成的成功或失败路径
+会尽力清理；Windows 无法立即自删时，helper 可能保留在用户临时目录中直到
+下次重启，如果连延迟删除也不可用则可能需要手动清理。该校验可以发现下载
+损坏或产物不匹配，但校验清单与二进制位于同一 GitHub Release，因此不等同
+于独立发布签名。
+
+Windows 会在当前进程退出后由受限助手完成替换。为避免把用户可写临时目录
+变成权限边界，自更新必须从非管理员终端运行；需要管理员权限时，请使用
+安装程序或手动替换二进制，之后可运行 `jvman version` 确认。Linux 和 macOS
+会在命令返回前完成原子替换。当前用户必须能写入可执行文件所在目录。更新只
+替换正在运行的 jvman 命令行，不会修改
+`JVMAN_HOME`、已安装 JDK、`PATH`、`JAVA_HOME`、shell profile 或 Windows
+安装器状态。
 
 ## 自动发现已安装的 Java
 
@@ -208,7 +245,7 @@ jvman/
 
 ## 当前边界
 
-`0.2.0` 通过 Adoptium 或 Foojay 目录安装 Temurin，远程安装只接受 Java 主版本。本地发现可以识别常见 JDK 厂商，但远程选择其他 JDK 供应商、托管 JRE、EA/GraalVM、复杂版本范围、项目级 `.java-version`、自更新和机器级环境变量修改暂不实现。
+`0.2.0` 通过 Adoptium 或 Foojay 目录安装 Temurin，远程安装只接受 Java 主版本。本地发现可以识别常见 JDK 厂商，但远程选择其他 JDK 供应商、托管 JRE、EA/GraalVM、复杂版本范围、项目级 `.java-version`、独立签名发布清单，以及 CLI 自动修改持久环境设置暂不实现。
 
 远程包必须匹配所选下载源返回的 SHA-256；用户传入 `--sha256` 时还会再校验用户固定值。该校验可以发现下载损坏或包不匹配，但不等价于独立的发布签名验证。
 

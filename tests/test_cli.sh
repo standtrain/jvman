@@ -76,6 +76,31 @@ if "$binary" discover --unknown >/dev/null 2>&1; then
     exit 1
 fi
 
+# Update argument validation must finish before any network or state access.
+if "$binary" update --unknown >/dev/null 2>&1 ||
+   "$binary" update --version >/dev/null 2>&1 ||
+   "$binary" update --version 1.2 >/dev/null 2>&1 ||
+   "$binary" update --check unexpected >/dev/null 2>&1 ||
+   "$binary" update --check --check >/dev/null 2>&1 ||
+   "$binary" update --version 0.2.0 --version 0.3.0 >/dev/null 2>&1; then
+    echo 'update accepted invalid arguments' >&2
+    exit 1
+fi
+current_version=$("$binary" version)
+"$binary" update --check --version "$current_version" |
+    grep -F 'already up to date' >/dev/null
+"$binary" update --version "$current_version" |
+    grep -F 'already up to date' >/dev/null
+long_home=
+long_home_index=0
+while test "$long_home_index" -lt 500; do
+    long_home="${long_home}xxxxxxxxxx"
+    long_home_index=$((long_home_index + 1))
+done
+JVMAN_HOME=$long_home "$binary" update --check --version "$current_version" |
+    grep -F 'already up to date' >/dev/null
+test ! -e "$state_root"
+
 test "$("$binary" source)" = adoptium
 if "$binary" source unknown >/dev/null 2>&1; then
     echo 'source accepted an unknown provider' >&2
@@ -149,11 +174,11 @@ archive=$test_root/fake-jdk.tar
 make_jdk "$archive_source/fake-jdk"
 tar -cf "$archive" -C "$archive_source" fake-jdk
 "$binary" install packed --archive "$archive"
-test -f "$archive"
-test -f "$("$binary" which packed)/bin/javac"
 if "$binary" install another --archive "$archive" --source foojay >/dev/null 2>&1; then
     echo 'local archive install accepted --source' >&2
     exit 1
 fi
+test -f "$archive"
+test -f "$("$binary" which packed)/bin/javac"
 "$binary" remove packed
 echo "All CLI integration tests passed."

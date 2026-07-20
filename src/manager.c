@@ -4,6 +4,7 @@
 #include "discovery.h"
 #include "platform.h"
 #include "sha256.h"
+#include "update.h"
 #include "util.h"
 
 #include <ctype.h>
@@ -817,9 +818,7 @@ static int command_doctor(const JvmanContext *context) {
         ++warnings;
     }
 #if defined(_WIN32)
-    if (platform_find_trusted_executable("curl.exe", actual_java, sizeof(actual_java)) == 0)
-        printf("[ok]   downloader: %s\n", actual_java);
-    else { printf("[warn] curl.exe is required for remote installs\n"); ++warnings; }
+    printf("[ok]   downloader: Windows WinHTTP\n");
     if (platform_find_trusted_executable("tar.exe", actual_java, sizeof(actual_java)) == 0)
         printf("[ok]   extractor: %s\n", actual_java);
     else { printf("[warn] tar.exe is required for installs\n"); ++warnings; }
@@ -890,7 +889,8 @@ static char *read_file_bounded(const char *path, size_t limit) {
         return NULL;
     }
     if ((size && fread(data, 1, size, file) != size) ||
-        (trailing = fgetc(file)) != EOF || ferror(file)) {
+        (trailing = fgetc(file)) != EOF || ferror(file) ||
+        memchr(data, '\0', size) != NULL) {
         free(data);
         fclose(file);
         return NULL;
@@ -1028,47 +1028,7 @@ static int download_metadata(const JvmanDownloadSource *source, int major,
 
 static int download_file(const char *url, const char *destination,
                          size_t limit, int show_progress) {
-    char *arguments[32];
-    char limit_text[32];
-    int index = 0;
-    int limit_length;
-#if defined(_WIN32)
-    char downloader_name[] = "curl.exe";
-#else
-    char downloader_name[] = "curl";
-#endif
-    char downloader[JVMAN_PATH_MAX];
-    limit_length = snprintf(limit_text, sizeof(limit_text), "%zu", limit);
-    if (!url || strncmp(url, "https://", 8) != 0 || limit == 0 ||
-        limit_length < 0 || limit_length >= (int)sizeof(limit_text) ||
-        platform_find_trusted_executable(downloader_name, downloader,
-                                         sizeof(downloader)) != 0) {
-        return -1;
-    }
-    arguments[index++] = downloader;
-    arguments[index++] = "--fail";
-    arguments[index++] = "--location";
-    arguments[index++] = "--show-error";
-    arguments[index++] = "--retry";
-    arguments[index++] = "2";
-    arguments[index++] = show_progress ? "--progress-bar" : "--silent";
-    arguments[index++] = "--header";
-    arguments[index++] = "User-Agent: jvman/" JVMAN_VERSION;
-    arguments[index++] = "--connect-timeout";
-    arguments[index++] = "30";
-    arguments[index++] = "--max-time";
-    arguments[index++] = show_progress ? "300" : "60";
-    arguments[index++] = "--proto";
-    arguments[index++] = "=https";
-    arguments[index++] = "--proto-redir";
-    arguments[index++] = "=https";
-    arguments[index++] = "--max-filesize";
-    arguments[index++] = limit_text;
-    arguments[index++] = "--output";
-    arguments[index++] = (char *)destination;
-    arguments[index++] = (char *)url;
-    arguments[index] = NULL;
-    return platform_spawn_wait(arguments);
+    return platform_https_download(url, destination, limit, show_progress);
 }
 
 static int extract_archive(const char *archive, const char *destination) {
@@ -1285,6 +1245,7 @@ static void print_usage(void) {
     puts("  jvman exec <name> [--] <command> [args...]");
     puts("  jvman init [powershell|cmd|sh]");
     puts("  jvman doctor");
+    puts("  jvman update [--check] [--version <version>]");
     puts("  jvman home");
 }
 
@@ -1355,6 +1316,7 @@ int jvman_run(JvmanContext *context, int argc, char **argv) {
         return argc <= 3 ? command_init(context, argc == 3 ? argv[2] : NULL) :
                print_error("usage: jvman init [powershell|cmd|sh]");
     if (strcmp(command, "doctor") == 0) return command_doctor(context);
+    if (strcmp(command, "update") == 0) return jvman_update_run_cli(argc, argv);
     print_usage();
     return print_error("unknown command");
 }

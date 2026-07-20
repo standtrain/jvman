@@ -1,6 +1,13 @@
 # 编译产物
 /build/
 /bin/
+/dist/
+/release-assets/
+/jvman
+/test_unit
+/test_update
+/test_update_flow
+/test_update_helper
 *.exe
 *.o
 *.obj

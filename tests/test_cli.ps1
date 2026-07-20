@@ -174,6 +174,36 @@ try {
     }
     Invoke-JvmanExpectFailure discover --unknown
 
+    # Update argument validation must finish before any network or state access.
+    Invoke-JvmanExpectFailure update --unknown
+    Invoke-JvmanExpectFailure update --version
+    Invoke-JvmanExpectFailure update --version 1.2
+    Invoke-JvmanExpectFailure update --check unexpected
+    Invoke-JvmanExpectFailure update --check --check
+    Invoke-JvmanExpectFailure update --version 0.2.0 --version 0.3.0
+    $currentVersion = (Invoke-Jvman version).Trim()
+    $updateCheck = (Invoke-Jvman update --check --version $currentVersion) -join "`n"
+    if ($updateCheck -notmatch 'already up to date') {
+        throw "same-version update check did not use the update command:`n$updateCheck"
+    }
+    $sameVersionUpdate = (Invoke-Jvman update --version $currentVersion) -join "`n"
+    if ($sameVersionUpdate -notmatch 'already up to date') {
+        throw "same-version update did not verify the running executable marker:`n$sameVersionUpdate"
+    }
+    $savedHome = $env:JVMAN_HOME
+    try {
+        $env:JVMAN_HOME = 'x' * 5000
+        $independentCheck = (Invoke-Jvman update --check --version $currentVersion) -join "`n"
+        if ($independentCheck -notmatch 'already up to date') {
+            throw 'update unexpectedly depended on JVMAN_HOME initialization'
+        }
+    } finally {
+        $env:JVMAN_HOME = $savedHome
+    }
+    if (Test-Path -LiteralPath $stateRoot) {
+        throw 'update argument checks created JVMAN_HOME'
+    }
+
     if ((Invoke-Jvman source).Trim() -ne 'adoptium') {
         throw 'default download source is not adoptium'
     }

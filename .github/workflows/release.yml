@@ -1,0 +1,350 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify-version:
+    name: Verify release version
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Match tag and build metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_version="$(sed -n 's/^#define JVMAN_VERSION "\([^"]*\)"$/\1/p' src/common.h)"
+          wide_version="$(sed -n 's/^#define JVMAN_VERSION_W L"\([^"]*\)"$/\1/p' src/common.h)"
+          numeric_version="$(sed -n 's/^#define JVMAN_VERSION_NUMERIC \(.*\)$/\1/p' src/common.h)"
+          cmake_version="$(sed -n 's/^project(jvman VERSION \([^ ]*\) LANGUAGES C)$/\1/p' CMakeLists.txt)"
+          cli_manifest_version="$(grep -A1 'assemblyIdentity name="jvman"' resources/jvman.manifest | sed -n 's/.*version="\([^"]*\)".*/\1/p')"
+          setup_manifest_version="$(grep -A1 'assemblyIdentity name="jvman.setup"' installer/installer.manifest | sed -n 's/.*version="\([^"]*\)".*/\1/p')"
+          readme_version="$(sed -n 's/^This documentation describes jvman `\([^`]*\)`\.$/\1/p' README.md)"
+          readme_zh_version="$(sed -n 's/^本文档对应 jvman `\([^`]*\)`。$/\1/p' README.zh-CN.md)"
+          readme_scope_version="$(sed -n 's/^Version `\([^`]*\)` installs Temurin.*/\1/p' README.md)"
+          readme_zh_scope_version="$(sed -n 's/^`\([^`]*\)` 通过 Adoptium.*/\1/p' README.zh-CN.md)"
+          tag_version="${GITHUB_REF_NAME#v}"
+          expected_numeric="${source_version//./,},0"
+          expected_manifest="${source_version}.0"
+
+          if [[ -z "${source_version}" || -z "${wide_version}" ||
+                -z "${numeric_version}" || -z "${cmake_version}" ||
+                -z "${cli_manifest_version}" || -z "${setup_manifest_version}" ||
+                -z "${readme_version}" || -z "${readme_zh_version}" ||
+                -z "${readme_scope_version}" ||
+                -z "${readme_zh_scope_version}" ]]; then
+            echo "Unable to read the version from source metadata." >&2
+            exit 1
+          fi
+          if [[ ! "${source_version}" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ||
+                "${GITHUB_REF_NAME}" != "v${source_version}" ||
+                "${tag_version}" != "${source_version}" ||
+                "${source_version}" != "${wide_version}" ||
+                "${source_version}" != "${cmake_version}" ||
+                "${numeric_version}" != "${expected_numeric}" ||
+                "${cli_manifest_version}" != "${expected_manifest}" ||
+                "${setup_manifest_version}" != "${expected_manifest}" ||
+                "${readme_version}" != "${source_version}" ||
+                "${readme_zh_version}" != "${source_version}" ||
+                "${readme_scope_version}" != "${source_version}" ||
+                "${readme_zh_scope_version}" != "${source_version}" ]]; then
+            echo "Release version metadata is inconsistent with tag ${tag_version}." >&2
+            exit 1
+          fi
+
+  build-windows:
+    name: Build Windows x86_64
+    needs: verify-version
+    runs-on: windows-2022
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Configure
+        shell: pwsh
+        run: >-
+          cmake -S . -B build -A x64
+          -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded
+          -DBUILD_TESTING=ON
+
+      - name: Build
+        shell: pwsh
+        run: cmake --build build --config Release --parallel
+
+      - name: Test
+        shell: pwsh
+        run: ctest --test-dir build -C Release --output-on-failure
+
+      - name: Stage Windows assets
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Path dist -Force | Out-Null
+          Copy-Item -LiteralPath build/Release/jvman.exe -Destination dist/jvman-windows-x86_64.exe
+          Copy-Item -LiteralPath build/jvman-setup.exe -Destination dist/jvman-setup-windows-x86_64.exe
+          foreach ($asset in @('dist/jvman-windows-x86_64.exe', 'dist/jvman-setup-windows-x86_64.exe')) {
+            if ((Get-Item -LiteralPath $asset).Length -le 0) {
+              throw "Release asset is empty: $asset"
+            }
+          }
+
+      - name: Upload Windows assets
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-windows-x86_64
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 1
+
+  build-linux:
+    name: Build static Linux x86_64
+    needs: verify-version
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Install musl toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends musl-tools
+
+      - name: Configure
+        env:
+          CC: musl-gcc
+        run: >-
+          cmake -S . -B build
+          -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_EXE_LINKER_FLAGS=-static
+          -DBUILD_TESTING=ON
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Stage Linux asset
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$(uname -m)" == "x86_64" ]]
+          file build/jvman | grep -F 'statically linked'
+          ! readelf -l build/jvman | grep -q 'Requesting program interpreter'
+          install -D -m 0755 build/jvman dist/jvman-linux-x86_64
+          [[ -s dist/jvman-linux-x86_64 ]]
+
+      - name: Upload Linux asset
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-linux-x86_64
+          path: dist/jvman-linux-x86_64
+          if-no-files-found: error
+          retention-days: 1
+
+  build-macos:
+    name: Build macOS ${{ matrix.asset_arch }}
+    needs: verify-version
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - cmake_arch: x86_64
+            asset_arch: x86_64
+            runner: macos-15-intel
+          - cmake_arch: arm64
+            asset_arch: aarch64
+            runner: macos-15
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Configure
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake -S . -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_OSX_ARCHITECTURES=${{ matrix.cmake_arch }} \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0 \
+            -DBUILD_TESTING=ON
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Test native build
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$(uname -m)" == "${{ matrix.cmake_arch }}" ]]
+          ctest --test-dir build --output-on-failure
+
+      - name: Stage macOS asset
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$(lipo -archs build/jvman)" == "${{ matrix.cmake_arch }}" ]]
+          install -d dist
+          install -m 0755 build/jvman "dist/jvman-macos-${{ matrix.asset_arch }}"
+          [[ -s "dist/jvman-macos-${{ matrix.asset_arch }}" ]]
+
+      - name: Upload macOS asset
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-macos-${{ matrix.asset_arch }}
+          path: dist/jvman-macos-${{ matrix.asset_arch }}
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    name: Publish GitHub Release
+    needs:
+      - build-windows
+      - build-linux
+      - build-macos
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download release assets
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: release-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Validate assets and create checksums
+        shell: bash
+        working-directory: release-assets
+        run: |
+          set -euo pipefail
+          assets=(
+            jvman-windows-x86_64.exe
+            jvman-setup-windows-x86_64.exe
+            jvman-linux-x86_64
+            jvman-macos-x86_64
+            jvman-macos-aarch64
+          )
+          for asset in "${assets[@]}"; do
+            [[ -s "${asset}" ]] || {
+              echo "Missing or empty release asset: ${asset}" >&2
+              exit 1
+            }
+            [[ "$(stat -c %s "${asset}")" -le 67108864 ]] || {
+              echo "Release asset exceeds the updater size limit: ${asset}" >&2
+              exit 1
+            }
+          done
+          sha256sum "${assets[@]}" > SHA256SUMS
+          [[ "$(wc -l < SHA256SUMS)" -eq "${#assets[@]}" ]]
+
+      - name: Create or verify complete draft release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          assets=(
+            release-assets/jvman-windows-x86_64.exe
+            release-assets/jvman-setup-windows-x86_64.exe
+            release-assets/jvman-linux-x86_64
+            release-assets/jvman-macos-x86_64
+            release-assets/jvman-macos-aarch64
+            release-assets/SHA256SUMS
+          )
+          draft_exists=false
+          release_rows="$(gh api --paginate \
+            "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+            --jq '.[] | [.tag_name, .draft] | @tsv')"
+          while IFS=$'\t' read -r release_tag release_is_draft; do
+            if [[ "${release_tag}" != "${GITHUB_REF_NAME}" ]]; then
+              continue
+            fi
+            if [[ "${release_is_draft}" != true ]]; then
+              echo "Published release ${GITHUB_REF_NAME} already exists; refusing to replace its assets." >&2
+              exit 1
+            fi
+            draft_exists=true
+          done <<< "${release_rows}"
+          if [[ "${draft_exists}" == false ]]; then
+            gh release create "${GITHUB_REF_NAME}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --verify-tag \
+              --draft \
+              --title "jvman ${GITHUB_REF_NAME#v}" \
+              --generate-notes
+          fi
+
+          [[ "$(gh release view "${GITHUB_REF_NAME}" \
+              --repo "${GITHUB_REPOSITORY}" --json isDraft --jq .isDraft)" == true ]]
+          declare -A remote_by_name=()
+          remote_names="$(gh release view "${GITHUB_REF_NAME}" \
+              --repo "${GITHUB_REPOSITORY}" --json assets \
+              --jq '.assets[].name')"
+          while IFS= read -r remote_name; do
+            remote_expected=false
+            [[ -n "${remote_name}" ]] || continue
+            for asset in "${assets[@]}"; do
+              if [[ "$(basename "${asset}")" == "${remote_name}" ]]; then
+                remote_expected=true
+                break
+              fi
+            done
+            if [[ "${remote_expected}" == false ]]; then
+              echo "Draft release contains an unexpected asset: ${remote_name}" >&2
+              exit 1
+            fi
+            remote_by_name["${remote_name}"]=1
+          done <<< "${remote_names}"
+          missing_assets=()
+          for asset in "${assets[@]}"; do
+            asset_name="$(basename "${asset}")"
+            if [[ -z "${remote_by_name[${asset_name}]+present}" ]]; then
+              missing_assets+=("${asset}")
+            fi
+          done
+          if [[ "${#missing_assets[@]}" -gt 0 ]]; then
+            gh release upload "${GITHUB_REF_NAME}" "${missing_assets[@]}" \
+              --repo "${GITHUB_REPOSITORY}"
+          fi
+
+          expected_assets="$(for asset in "${assets[@]}"; do basename "${asset}"; done | LC_ALL=C sort)"
+          actual_assets="$(gh release view "${GITHUB_REF_NAME}" \
+              --repo "${GITHUB_REPOSITORY}" --json assets \
+              --jq '.assets[].name' | LC_ALL=C sort)"
+          if [[ "${actual_assets}" != "${expected_assets}" ]]; then
+            echo "Draft release assets do not match the verified local set; the draft was left unchanged and must be removed manually before retrying." >&2
+            exit 1
+          fi
+          remote_dir="$(mktemp -d)"
+          trap 'rm -rf "${remote_dir}"' EXIT
+          gh release download "${GITHUB_REF_NAME}" \
+            --repo "${GITHUB_REPOSITORY}" --dir "${remote_dir}"
+          for asset in "${assets[@]}"; do
+            cmp --silent "${asset}" "${remote_dir}/$(basename "${asset}")" || {
+              echo "Uploaded draft asset differs from local verified bytes: ${asset}" >&2
+              exit 1
+            }
+          done
+
+      - name: Publish verified release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          gh release edit "${GITHUB_REF_NAME}"
+          --repo "${GITHUB_REPOSITORY}"
+          --draft=false
+          --latest
