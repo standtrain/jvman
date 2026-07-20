@@ -142,6 +142,8 @@ static void test_json(void) {
 static void test_download_sources(void) {
     static const char checksum[] =
         "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    const JvmanDownloadSource *automatic =
+        jvman_download_source_find("auto");
     const JvmanDownloadSource *adoptium =
         jvman_download_source_find("adoptium");
     const JvmanDownloadSource *foojay =
@@ -152,13 +154,40 @@ static void test_download_sources(void) {
     char version[128];
     char detail_url[256];
     char json[1024];
+    uint64_t started;
+    uint64_t finished;
+    JvmanDownloadSourceProbe probes[2];
 
-    CHECK(adoptium == jvman_download_source_default());
+    CHECK(automatic == jvman_download_source_default());
+    CHECK(automatic != NULL &&
+          automatic->kind == JVMAN_DOWNLOAD_SOURCE_AUTO);
     CHECK(foojay != NULL);
-    CHECK(jvman_download_source_count() == 2);
-    CHECK(jvman_download_source_at(2) == NULL);
+    CHECK(jvman_download_source_count() == 3);
+    CHECK(jvman_download_source_at(3) == NULL);
     CHECK(jvman_download_source_find("FOOJAY") == NULL);
     CHECK(jvman_download_source_find("../foojay") == NULL);
+    CHECK(platform_monotonic_millis(&started) == 0);
+    CHECK(platform_monotonic_millis(&finished) == 0);
+    CHECK(finished >= started);
+    CHECK(jvman_download_source_build_metadata_url(
+              automatic, 21, "windows", "x64", ".zip",
+              url, sizeof(url)) != 0);
+    probes[0].source = adoptium;
+    probes[0].elapsed_millis = 80;
+    probes[0].available = 1;
+    probes[1].source = foojay;
+    probes[1].elapsed_millis = 25;
+    probes[1].available = 1;
+    CHECK(jvman_download_source_select_fastest(probes, 2) == foojay);
+    probes[1].available = 0;
+    CHECK(jvman_download_source_select_fastest(probes, 2) == adoptium);
+    probes[0].available = 0;
+    CHECK(jvman_download_source_select_fastest(probes, 2) == NULL);
+    probes[0].available = 1;
+    probes[1].available = 1;
+    probes[0].elapsed_millis = 25;
+    CHECK(jvman_download_source_select_fastest(probes, 2) == adoptium);
+    CHECK(jvman_download_source_select_fastest(NULL, 0) == NULL);
     CHECK(jvman_download_source_build_metadata_url(
               adoptium, 21, "windows", "x64", ".zip",
               url, sizeof(url)) == 0);

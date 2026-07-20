@@ -13,6 +13,7 @@
 #define JVMAN_JSON_DEPTH_MAX 64u
 
 static const JvmanDownloadSource download_sources[] = {
+    {"auto", "Automatic (fastest available)", JVMAN_DOWNLOAD_SOURCE_AUTO},
     {"adoptium", "Adoptium API", JVMAN_DOWNLOAD_SOURCE_ADOPTIUM},
     {"foojay", "Foojay Disco API", JVMAN_DOWNLOAD_SOURCE_FOOJAY}
 };
@@ -36,6 +37,25 @@ size_t jvman_download_source_count(void) {
 
 const JvmanDownloadSource *jvman_download_source_at(size_t index) {
     return index < jvman_download_source_count() ? &download_sources[index] : NULL;
+}
+
+const JvmanDownloadSource *jvman_download_source_select_fastest(
+    const JvmanDownloadSourceProbe *probes, size_t count) {
+    const JvmanDownloadSource *selected = NULL;
+    uint64_t selected_elapsed = UINT64_MAX;
+    size_t i;
+    if (!probes && count != 0) return NULL;
+    for (i = 0; i < count; ++i) {
+        if (!probes[i].available || !probes[i].source ||
+            probes[i].source->kind == JVMAN_DOWNLOAD_SOURCE_AUTO) {
+            continue;
+        }
+        if (!selected || probes[i].elapsed_millis < selected_elapsed) {
+            selected = probes[i].source;
+            selected_elapsed = probes[i].elapsed_millis;
+        }
+    }
+    return selected;
 }
 
 static const char *foojay_os(const char *os) {

@@ -2,10 +2,12 @@
 #define JVMAN_DOWNLOAD_SOURCE_H
 
 #include <stddef.h>
+#include <stdint.h>
 
 typedef enum JvmanDownloadSourceKind {
-    JVMAN_DOWNLOAD_SOURCE_ADOPTIUM = 0,
-    JVMAN_DOWNLOAD_SOURCE_FOOJAY = 1
+    JVMAN_DOWNLOAD_SOURCE_AUTO = 0,
+    JVMAN_DOWNLOAD_SOURCE_ADOPTIUM = 1,
+    JVMAN_DOWNLOAD_SOURCE_FOOJAY = 2
 } JvmanDownloadSourceKind;
 
 typedef struct JvmanDownloadSource {
@@ -14,10 +16,18 @@ typedef struct JvmanDownloadSource {
     JvmanDownloadSourceKind kind;
 } JvmanDownloadSource;
 
+typedef struct JvmanDownloadSourceProbe {
+    const JvmanDownloadSource *source;
+    uint64_t elapsed_millis;
+    int available;
+} JvmanDownloadSourceProbe;
+
 const JvmanDownloadSource *jvman_download_source_default(void);
 const JvmanDownloadSource *jvman_download_source_find(const char *name);
 size_t jvman_download_source_count(void);
 const JvmanDownloadSource *jvman_download_source_at(size_t index);
+const JvmanDownloadSource *jvman_download_source_select_fastest(
+    const JvmanDownloadSourceProbe *probes, size_t count);
 
 int jvman_download_source_build_metadata_url(
     const JvmanDownloadSource *source, int major, const char *os,

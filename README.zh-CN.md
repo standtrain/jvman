@@ -10,7 +10,7 @@
 
 ## 当前功能
 
-- 通过 Adoptium 或 Foojay API 按 Java 主版本下载 Temurin JDK。
+- 下载 Temurin 前自动测速并选择 Adoptium 或 Foojay API。
 - 使用所选下载源元数据中的 SHA-256 校验远程安装包。
 - 从本地归档离线安装，可额外固定 SHA-256。
 - 注册已有 JDK，不复制原目录。
@@ -88,7 +88,8 @@ jvman-setup.exe /HELP
 # 下载当前平台最新的 Temurin 21
 jvman install 21
 
-# 持久切换下载源，也可仅覆盖单次安装
+# 默认自动测速选源，也可固定下载源或仅覆盖单次安装
+jvman source auto
 jvman source foojay
 jvman install 17 --source adoptium
 
@@ -139,10 +140,12 @@ jvman home
 
 别名：`ls` 等同于 `list`，`default` 等同于 `use`，`uninstall` 等同于 `remove`。
 
-`jvman source` 显示当前下载源，`jvman source --list` 列出内置的
-`adoptium` 和 `foojay`，`jvman source <下载源>` 持久保存选择，`--reset`
-恢复 Adoptium。安装命令的 `--source` 只覆盖本次下载。下载源名称仅接受内置白名单，
-元数据和安装包地址必须使用 HTTPS，且所有远程安装包都必须提供并通过 SHA-256 校验。
+`jvman source` 显示当前模式，`jvman source --list` 列出 `auto`、`adoptium`
+和 `foojay`，`jvman source <下载源>` 持久保存选择，`--reset` 恢复自动选源。
+安装命令的 `--source` 只覆盖本次下载。`auto` 模式会在每次安装时测量各源完成
+元数据和 SHA-256 解析的总耗时，忽略不可用源，并使用最快的成功结果只下载一次 JDK；
+测速过程不会额外下载 JDK 样本数据。下载源名称仅接受内置白名单，元数据和安装包地址
+必须使用 HTTPS，且所有远程安装包都必须提供并通过 SHA-256 校验。
 
 常用示例：
 
@@ -225,7 +228,7 @@ jvman/
   jdks/              由 jvman 管理的 JDK
   staging/           尚未提交的安装内容
   versions/*.conf    名称到 JAVA_HOME 的注册记录
-  source.conf        当前远程下载源
+  source.conf        当前远程下载源模式（缺省为 auto）
   current            指向当前 JDK 的 junction/symlink
   current.version    当前注册名称
   state.lock         跨进程状态锁
@@ -245,7 +248,7 @@ jvman/
 
 ## 当前边界
 
-`0.2.0` 通过 Adoptium 或 Foojay 目录安装 Temurin，远程安装只接受 Java 主版本。本地发现可以识别常见 JDK 厂商，但远程选择其他 JDK 供应商、托管 JRE、EA/GraalVM、复杂版本范围、项目级 `.java-version`、独立签名发布清单，以及 CLI 自动修改持久环境设置暂不实现。
+`0.2.0` 会在 Adoptium 与 Foojay 目录之间自动测速选源，远程安装只接受 Java 主版本。本地发现可以识别常见 JDK 厂商，但远程选择其他 JDK 供应商、托管 JRE、EA/GraalVM、复杂版本范围、项目级 `.java-version`、独立签名发布清单，以及 CLI 自动修改持久环境设置暂不实现。
 
 远程包必须匹配所选下载源返回的 SHA-256；用户传入 `--sha256` 时还会再校验用户固定值。该校验可以发现下载损坏或包不匹配，但不等价于独立的发布签名验证。
 

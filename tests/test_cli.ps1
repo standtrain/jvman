@@ -204,8 +204,8 @@ try {
         throw 'update argument checks created JVMAN_HOME'
     }
 
-    if ((Invoke-Jvman source).Trim() -ne 'adoptium') {
-        throw 'default download source is not adoptium'
+    if ((Invoke-Jvman source).Trim() -ne 'auto') {
+        throw 'default download source is not automatic'
     }
     Invoke-JvmanExpectFailure source unknown
     Invoke-Jvman source foojay | Out-Null
@@ -215,12 +215,18 @@ try {
     }
     $sourceList = (Invoke-Jvman source --list) -join "`n"
     if ($sourceList -notmatch '(?m)^\* foojay' -or
+        $sourceList -notmatch '(?m)^  auto' -or
         $sourceList -notmatch '(?m)^  adoptium') {
         throw 'download source list did not mark the active source'
     }
     Invoke-JvmanExpectFailure install 21 --source unknown
+    Invoke-Jvman source auto | Out-Null
+    if ((Invoke-Jvman source).Trim() -ne 'auto' -or
+        (Get-Content -LiteralPath (Join-Path $stateRoot 'source.conf') -Raw).Trim() -ne 'auto') {
+        throw 'automatic download source selection was not persisted'
+    }
     Invoke-Jvman source --reset | Out-Null
-    if ((Invoke-Jvman source).Trim() -ne 'adoptium' -or
+    if ((Invoke-Jvman source).Trim() -ne 'auto' -or
         (Test-Path -LiteralPath (Join-Path $stateRoot 'source.conf'))) {
         throw 'download source reset did not restore the default'
     }

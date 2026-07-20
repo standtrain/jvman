@@ -20,7 +20,7 @@ after an explicit choice.
 
 ## Features
 
-- Download Temurin JDKs by Java major version through the Adoptium or Foojay API.
+- Automatically benchmark the Adoptium and Foojay APIs before downloading Temurin.
 - Verify remote archives with the SHA-256 published by the selected source.
 - Install from a local archive for offline use.
 - Register an existing JDK without copying it.
@@ -131,7 +131,8 @@ only files and environment entries owned by this installation. Registered JDKs,
 # Download the latest Temurin build for a Java major version.
 jvman install 21
 
-# Persistently switch the metadata/download source, or override it once.
+# Automatic source selection is the default; fixed sources remain available.
+jvman source auto
 jvman source foojay
 jvman install 17 --source adoptium
 
@@ -185,12 +186,15 @@ jvman home
 
 Aliases: `ls` for `list`, `default` for `use`, and `uninstall` for `remove`.
 
-`jvman source` prints the active source. `jvman source --list` lists the
-built-in `adoptium` and `foojay` sources, `jvman source <name>` persists a
-selection, and `--reset` restores Adoptium. An install-level `--source` only
-overrides that invocation. Source names are restricted to the built-in list;
-metadata and package URLs must use HTTPS, and every remote package must include
-and match a SHA-256 checksum.
+`jvman source` prints the active mode. `jvman source --list` lists `auto`,
+`adoptium`, and `foojay`; `jvman source <name>` persists a selection, and
+`--reset` restores automatic selection. An install-level `--source` only
+overrides that invocation. In `auto` mode, each install measures the complete
+metadata and checksum resolution time for every source, ignores unavailable
+sources, and downloads the JDK once from the fastest successful result. This
+does not download sample JDK data during the benchmark. Source names are
+restricted to the built-in list; metadata and package URLs must use HTTPS, and
+every remote package must include and match a SHA-256 checksum.
 
 Examples:
 
@@ -298,7 +302,7 @@ jvman/
   jdks/              JDKs owned by jvman
   staging/           incomplete installs, never activated
   versions/*.conf    registered name -> JAVA_HOME records
-  source.conf        selected remote download source
+  source.conf        selected remote source mode (absent means auto)
   current            junction/symlink to the selected JDK
   current.version    selected registration name
   state.lock         cross-process mutation lock
@@ -327,7 +331,7 @@ No source code is copied from those projects.
 
 ## Current Scope
 
-Version `0.2.0` installs Temurin through either the Adoptium or Foojay catalog
+Version `0.2.0` automatically selects between the Adoptium and Foojay catalogs
 and accepts a Java major version for remote installs. Local discovery recognizes
 common JDK vendors, but multi-vendor JDK selection, managed JREs, EA builds, semantic
 version ranges, project `.java-version` files, signed release manifests, and

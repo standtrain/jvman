@@ -101,7 +101,7 @@ JVMAN_HOME=$long_home "$binary" update --check --version "$current_version" |
     grep -F 'already up to date' >/dev/null
 test ! -e "$state_root"
 
-test "$("$binary" source)" = adoptium
+test "$("$binary" source)" = auto
 if "$binary" source unknown >/dev/null 2>&1; then
     echo 'source accepted an unknown provider' >&2
     exit 1
@@ -114,8 +114,11 @@ if "$binary" install 21 --source unknown >/dev/null 2>&1; then
     echo 'install accepted an unknown source' >&2
     exit 1
 fi
+"$binary" source auto
+test "$("$binary" source)" = auto
+grep -Fx auto "$state_root/source.conf" >/dev/null
 "$binary" source --reset
-test "$("$binary" source)" = adoptium
+test "$("$binary" source)" = auto
 test ! -e "$state_root/source.conf"
 
 "$binary" add "$discovery_name" "$name_conflict"

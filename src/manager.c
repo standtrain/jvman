@@ -8,12 +8,14 @@
 #include "util.h"
 
 #include <ctype.h>
+#include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #define JVMAN_METADATA_LIMIT (1024u * 1024u)
 #define JVMAN_JDK_ARCHIVE_LIMIT ((size_t)1024u * 1024u * 1024u)
+#define JVMAN_DOWNLOAD_SOURCE_LIMIT 8u
 
 static int print_error(const char *message) {
     fprintf(stderr, "jvman: %s\n", message);
@@ -987,6 +989,13 @@ done:
 static int download_file(const char *url, const char *destination,
                          size_t limit, int show_progress);
 
+static int resolve_fastest_download_source(
+    int major, const char *metadata_path,
+    const JvmanDownloadSource **selected_out,
+    char *download_url, size_t url_size,
+    char *checksum, size_t checksum_size,
+    char *exact_version, size_t version_size);
+
 static int download_metadata(const JvmanDownloadSource *source, int major,
                              const char *metadata_path,
                              char *download_url, size_t url_size,
@@ -1029,6 +1038,94 @@ static int download_metadata(const JvmanDownloadSource *source, int major,
 static int download_file(const char *url, const char *destination,
                          size_t limit, int show_progress) {
     return platform_https_download(url, destination, limit, show_progress);
+}
+
+static int resolve_fastest_download_source(
+    int major, const char *metadata_path,
+    const JvmanDownloadSource **selected_out,
+    char *download_url, size_t url_size,
+    char *checksum, size_t checksum_size,
+    char *exact_version, size_t version_size) {
+    typedef struct ResolvedSource {
+        JvmanDownloadSourceProbe probe;
+        char url[2048];
+        char checksum[80];
+        char version[128];
+    } ResolvedSource;
+    ResolvedSource resolved_sources[JVMAN_DOWNLOAD_SOURCE_LIMIT] = {0};
+    JvmanDownloadSourceProbe probes[JVMAN_DOWNLOAD_SOURCE_LIMIT] = {0};
+    const JvmanDownloadSource *best;
+    ResolvedSource *best_result = NULL;
+    size_t resolved_count = 0;
+    size_t i;
+    if (!metadata_path || !selected_out || !download_url || url_size == 0 ||
+        !checksum || checksum_size == 0 || !exact_version ||
+        version_size == 0) {
+        return -1;
+    }
+    puts("Testing download sources...");
+    fflush(stdout);
+    if (jvman_download_source_count() > JVMAN_DOWNLOAD_SOURCE_LIMIT) return -1;
+    for (i = 0; i < jvman_download_source_count(); ++i) {
+        const JvmanDownloadSource *source = jvman_download_source_at(i);
+        ResolvedSource *candidate;
+        uint64_t started;
+        uint64_t finished;
+        uint64_t elapsed;
+        int resolved;
+        if (!source || source->kind == JVMAN_DOWNLOAD_SOURCE_AUTO) continue;
+        candidate = &resolved_sources[resolved_count++];
+        candidate->probe.source = source;
+        if ((platform_path_exists(metadata_path) &&
+             platform_remove_file(metadata_path) != 0) ||
+            platform_monotonic_millis(&started) != 0) {
+            return -1;
+        }
+        resolved = download_metadata(
+            source, major, metadata_path, candidate->url,
+            sizeof(candidate->url), candidate->checksum,
+            sizeof(candidate->checksum), candidate->version,
+            sizeof(candidate->version));
+        if (platform_monotonic_millis(&finished) != 0 || finished < started) {
+            return -1;
+        }
+        elapsed = finished - started;
+        candidate->probe.elapsed_millis = elapsed;
+        candidate->probe.available = resolved == 0;
+        probes[resolved_count - 1] = candidate->probe;
+        if (resolved != 0) {
+            const char *reason = platform_last_error();
+            printf("  %-10s %" PRIu64 " ms, unavailable (%s)\n",
+                   source->name, elapsed,
+                   reason && *reason ? reason : "invalid metadata");
+            fflush(stdout);
+            continue;
+        }
+        printf("  %-10s %" PRIu64 " ms\n", source->name, elapsed);
+        fflush(stdout);
+    }
+    best = jvman_download_source_select_fastest(
+        probes, resolved_count);
+    if (!best) return -1;
+    for (i = 0; i < resolved_count; ++i) {
+        if (resolved_sources[i].probe.source == best) {
+            best_result = &resolved_sources[i];
+            break;
+        }
+    }
+    if (!best_result || strlen(best_result->url) >= url_size ||
+        strlen(best_result->checksum) >= checksum_size ||
+        strlen(best_result->version) >= version_size) {
+        return -1;
+    }
+    strcpy(download_url, best_result->url);
+    strcpy(checksum, best_result->checksum);
+    strcpy(exact_version, best_result->version);
+    *selected_out = best;
+    printf("Selected download source: %s (%" PRIu64 " ms)\n",
+           best->name, best_result->probe.elapsed_millis);
+    fflush(stdout);
+    return 0;
 }
 
 static int extract_archive(const char *archive, const char *destination) {
@@ -1141,14 +1238,33 @@ static int command_install(const JvmanContext *context, const char *version,
         goto cleanup;
     }
     if (remote) {
-        printf("Resolving Temurin %d for %s/%s via %s...\n", major,
-               platform_os_name(), platform_arch_name(), download_source->label);
-        if (download_metadata(download_source, major, metadata, url, sizeof(url), checksum,
-                              sizeof(checksum), exact_version, sizeof(exact_version)) != 0) {
-            print_error("could not resolve a Temurin package from the selected source");
+        int automatic = download_source->kind == JVMAN_DOWNLOAD_SOURCE_AUTO;
+        int resolve_result;
+        if (automatic) {
+            printf("Resolving Temurin %d for %s/%s automatically...\n",
+                   major, platform_os_name(), platform_arch_name());
+            fflush(stdout);
+            resolve_result = resolve_fastest_download_source(
+                major, metadata, &download_source, url, sizeof(url),
+                checksum, sizeof(checksum), exact_version,
+                sizeof(exact_version));
+        } else {
+            printf("Resolving Temurin %d for %s/%s via %s...\n", major,
+                   platform_os_name(), platform_arch_name(),
+                   download_source->label);
+            fflush(stdout);
+            resolve_result = download_metadata(
+                download_source, major, metadata, url, sizeof(url), checksum,
+                sizeof(checksum), exact_version, sizeof(exact_version));
+        }
+        if (resolve_result != 0) {
+            print_error(automatic
+                            ? "could not resolve a Temurin package from any available source"
+                            : "could not resolve a Temurin package from the selected source");
             goto cleanup;
         }
         printf("Downloading Temurin %s...\n", exact_version);
+        fflush(stdout);
         if (download_file(url, archive, JVMAN_JDK_ARCHIVE_LIMIT, 1) != 0) {
             print_error("download failed");
             goto cleanup;

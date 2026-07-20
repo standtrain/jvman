@@ -1391,6 +1391,21 @@ unsigned long platform_process_id(void) {
 #endif
 }
 
+int platform_monotonic_millis(uint64_t *value_out) {
+    if (!value_out) return -1;
+#if defined(_WIN32)
+    *value_out = (uint64_t)GetTickCount64();
+#else
+    {
+        struct timespec now;
+        if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) return -1;
+        *value_out = (uint64_t)now.tv_sec * 1000u +
+                     (uint64_t)now.tv_nsec / 1000000u;
+    }
+#endif
+    return 0;
+}
+
 int platform_lock_acquire(const char *path, PlatformLock *lock) {
     if (!lock) return -1;
 #if defined(_WIN32)

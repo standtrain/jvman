@@ -4,6 +4,7 @@
 #include "common.h"
 
 #include <stddef.h>
+#include <stdint.h>
 
 typedef struct PlatformLock {
 #if defined(_WIN32)
@@ -59,6 +60,7 @@ const char *platform_os_name(void);
 const char *platform_arch_name(void);
 const char *platform_archive_extension(void);
 unsigned long platform_process_id(void);
+int platform_monotonic_millis(uint64_t *value_out);
 int platform_lock_acquire(const char *path, PlatformLock *lock);
 void platform_lock_release(PlatformLock *lock);
 
