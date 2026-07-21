@@ -91,7 +91,7 @@ jvman init powershell | Invoke-Expression
 
 无人值守部署时，请将需要的参数与 `/S` 组合使用；不带 `/S` 时会显示相同选项的图形确认对话框。
 
-`/PORTABLE /DIR=...` 只把 `jvman.exe` 解压到显式指定的目录，不创建 `JVMAN_HOME`，不写注册表，也不修改 `PATH` 或 `JAVA_HOME`，适合 U 盘或项目目录。普通卸载可从“应用和功能”或 `/UNINSTALL` 进入。交互式卸载会先选择范围，再显示最终高风险确认；`/S` 仅用于无人值守场景。
+`/PORTABLE /DIR=...` 只把 `jvman.exe` 解压到显式指定的目录，不创建 `JVMAN_HOME`，不写注册表，也不修改 `PATH` 或 `JAVA_HOME`，适合 U 盘或项目目录。普通卸载可从“应用和功能”、`/UNINSTALL` 或已安装命令行的 `jvman uninstall` 进入。交互式卸载会先选择范围，再显示最终高风险确认；`/S` 仅用于无人值守场景。
 
 卸载范围分为三级：默认只删除程序本体和本安装器拥有的环境变量；`/REMOVE_DATA` 还会删除 `JVMAN_HOME` 中除顶层 `jdks` 目录外的数据；`/REMOVE_DATA /REMOVE_JDKS` 会删除整个 `JVMAN_HOME` 及其中由 jvman 管理的 JDK。`/REMOVE_JDKS` 不能单独使用。删除过程不会跟随 junction 或符号链接，通过外部路径注册的 JDK 永远不会被删除。静默卸载属于破坏性操作，应仅在调用方已明确确认删除范围后使用。
 
@@ -149,6 +149,7 @@ jvman list
 jvman current
 jvman which [名称]
 jvman remove <名称>
+jvman uninstall [<名称>]
 jvman exec <名称> [--] <命令> [参数...]
 jvman init [powershell|cmd|sh]
 jvman doctor
@@ -156,7 +157,7 @@ jvman update [--check] [--version <版本>]
 jvman home
 ```
 
-别名：`ls` 等同于 `list`，`default` 等同于 `use`，`uninstall` 等同于 `remove`。
+别名：`ls` 等同于 `list`，`default` 等同于 `use`，`uninstall <名称>` 等同于 `remove <名称>`。在 Windows 上，无名称的 `jvman uninstall` 会校验当前副本对应的安装器元数据与安装标记，再启动该安装的卸载程序；便携副本或未注册副本会被拒绝。
 
 `jvman source` 显示当前模式。内置源包括 `tsinghua`（清华 TUNA Adoptium 镜像）、
 `huawei`（毕昇 JDK）、`aliyun`（Dragonwell）、`adoptium` 和 `foojay`；`auto`

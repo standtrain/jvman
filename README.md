@@ -139,8 +139,9 @@ non-silent run presents the same choices in the graphical prompts.
 `/PORTABLE /DIR=...` extracts only `jvman.exe` to the explicitly supplied
 directory. It does not create `JVMAN_HOME`, write the registry, or modify
 `PATH`/`JAVA_HOME`, and is suitable for a USB or per-project copy. The regular
-uninstaller is available from Add/Remove Programs or `/UNINSTALL`. Interactive
-uninstall first selects a removal scope and then shows a final destructive-
+uninstaller is available from Add/Remove Programs, `/UNINSTALL`, or
+`jvman uninstall` from the installed CLI. Interactive uninstall first selects
+a removal scope and then shows a final destructive-
 action confirmation; `/S` is reserved for unattended use.
 
 There are three scopes. By default, uninstall removes only the program and
@@ -209,6 +210,7 @@ jvman list
 jvman current
 jvman which [name]
 jvman remove <name>
+jvman uninstall [<name>]
 jvman exec <name> [--] <command> [args...]
 jvman init [powershell|cmd|sh]
 jvman doctor
@@ -216,7 +218,10 @@ jvman update [--check] [--version <version>]
 jvman home
 ```
 
-Aliases: `ls` for `list`, `default` for `use`, and `uninstall` for `remove`.
+Aliases: `ls` for `list`, `default` for `use`, and `uninstall <name>` for
+`remove <name>`. On Windows, `jvman uninstall` without a name validates the
+Installer metadata and install marker for the running copy, then starts that
+installation's uninstaller. Portable or unregistered copies are rejected.
 
 `jvman source` prints the active mode. The built-in sources are `tsinghua`
 (TUNA Adoptium mirror), `huawei` (BiSheng), `aliyun` (Dragonwell), `adoptium`,

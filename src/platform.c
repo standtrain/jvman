@@ -16,6 +16,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <shellapi.h>
+#include <shlobj.h>
 #include <winhttp.h>
 #include <winioctl.h>
 #include <direct.h>
@@ -24,6 +25,18 @@
 #include <process.h>
 #include <sys/stat.h>
 #include <wchar.h>
+#include <wctype.h>
+
+#define JVMAN_WINDOWS_INSTALLER_KEY L"Software\\jvman\\Installer"
+#define JVMAN_WINDOWS_INSTALLER_STATE_0 L"State0"
+#define JVMAN_WINDOWS_INSTALLER_STATE_1 L"State1"
+#define JVMAN_WINDOWS_ACTIVE_STATE L"ActiveState"
+#define JVMAN_WINDOWS_INSTALL_DIR L"InstallDir"
+#define JVMAN_WINDOWS_INSTALL_ID L"InstallId"
+#define JVMAN_WINDOWS_DATA_HOME L"DataHome"
+#define JVMAN_WINDOWS_INSTALL_MARKER L"install.marker"
+#define JVMAN_WINDOWS_UNINSTALLER L"uninstall.exe"
+#define JVMAN_WINDOWS_INSTALL_ID_CHARS 128u
 
 /* Windows SDK headers hide these names behind a newer target macro. */
 typedef struct JvmanFileDispositionInfoEx {
@@ -1760,6 +1773,488 @@ int platform_current_executable(char *out, size_t out_size) {
     (void)out;
     (void)out_size;
     platform_set_error("self-update is unsupported on this operating system");
+    return -1;
+#endif
+}
+
+#if defined(_WIN32)
+typedef struct WindowsInstallerIdentity {
+    WCHAR install_dir[JVMAN_PATH_MAX];
+    WCHAR data_home[JVMAN_PATH_MAX];
+    WCHAR install_id[JVMAN_WINDOWS_INSTALL_ID_CHARS];
+} WindowsInstallerIdentity;
+
+static int windows_metadata_character_valid(WCHAR value) {
+    return value >= 0x20 && value != 0x7f;
+}
+
+static int windows_metadata_path_valid(const WCHAR *path) {
+    size_t length;
+    size_t start;
+    size_t index;
+    if (!path) return 0;
+    length = wcslen(path);
+    if (length <= 3u || length >= JVMAN_PATH_MAX ||
+        !((path[0] >= L'A' && path[0] <= L'Z') ||
+          (path[0] >= L'a' && path[0] <= L'z')) ||
+        path[1] != L':' || path[2] != L'\\' ||
+        path[length - 1u] == L'\\') {
+        return 0;
+    }
+    for (index = 0u; index < length; ++index) {
+        WCHAR value = path[index];
+        if (!windows_metadata_character_valid(value) || value == L'%' ||
+            value == L';' || value == L'"' || value == L'\'' ||
+            value == L'/' || value == L'<' || value == L'>' ||
+            value == L'|' || value == L'*' || value == L'?' ||
+            (value == L':' && index != 1u)) {
+            return 0;
+        }
+    }
+    start = 3u;
+    while (start < length) {
+        size_t end = start;
+        while (end < length && path[end] != L'\\') ++end;
+        if (end == start ||
+            (end - start == 1u && path[start] == L'.') ||
+            (end - start == 2u && path[start] == L'.' &&
+             path[start + 1u] == L'.') ||
+            path[end - 1u] == L'.' || path[end - 1u] == L' ') {
+            return 0;
+        }
+        start = end + 1u;
+    }
+    return 1;
+}
+
+static int windows_install_id_valid(const WCHAR *install_id) {
+    size_t index;
+    size_t length;
+    if (!install_id) return 0;
+    length = wcslen(install_id);
+    if (length == 0u || length >= JVMAN_WINDOWS_INSTALL_ID_CHARS) return 0;
+    for (index = 0u; index < length; ++index) {
+        WCHAR value = install_id[index];
+        if (!((value >= L'A' && value <= L'Z') ||
+              (value >= L'a' && value <= L'z') ||
+              (value >= L'0' && value <= L'9') || value == L'.' ||
+              value == L'_' || value == L'-')) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static int windows_query_metadata_string(HKEY key, const WCHAR *name,
+                                         WCHAR *out, size_t capacity) {
+    DWORD type = 0;
+    DWORD bytes;
+    LSTATUS status;
+    size_t characters;
+    size_t index;
+    if (!key || !name || !out || capacity < 2u ||
+        capacity > (size_t)UINT32_MAX / sizeof(*out)) {
+        return -1;
+    }
+    memset(out, 0, capacity * sizeof(*out));
+    bytes = (DWORD)(capacity * sizeof(*out));
+    status = RegGetValueW(key, NULL, name,
+                          RRF_RT_REG_SZ | RRF_ZEROONFAILURE, &type, out,
+                          &bytes);
+    if (status == ERROR_FILE_NOT_FOUND || status == ERROR_PATH_NOT_FOUND) {
+        return 0;
+    }
+    if (status != ERROR_SUCCESS) {
+        SetLastError((DWORD)status);
+        platform_set_windows_error("cannot read jvman installer metadata");
+        return -1;
+    }
+    if (type != REG_SZ || bytes < sizeof(*out) ||
+        (bytes % sizeof(*out)) != 0u) {
+        platform_set_error("the registered jvman installer metadata is invalid");
+        return -1;
+    }
+    characters = (size_t)bytes / sizeof(*out);
+    if (characters > capacity || out[characters - 1u] != L'\0') {
+        platform_set_error("the registered jvman installer metadata is invalid");
+        return -1;
+    }
+    for (index = 0u; index + 1u < characters; ++index) {
+        if (out[index] == L'\0' ||
+            !windows_metadata_character_valid(out[index])) {
+            platform_set_error(
+                "the registered jvman installer metadata is invalid");
+            return -1;
+        }
+    }
+    return 1;
+}
+
+static int windows_marker_matches(const WCHAR *directory,
+                                  const WCHAR *install_id) {
+    WCHAR marker_path[JVMAN_PATH_MAX];
+    unsigned char bytes[JVMAN_WINDOWS_INSTALL_ID_CHARS * sizeof(WCHAR)];
+    HANDLE marker = INVALID_HANDLE_VALUE;
+    DWORD attributes;
+    DWORD read_count = 0;
+    DWORD extra_count = 0;
+    unsigned char extra;
+    size_t characters;
+    size_t index;
+    int written;
+    int result = -1;
+    if (!directory || !install_id) return -1;
+    written = _snwprintf(marker_path,
+                         sizeof(marker_path) / sizeof(marker_path[0]),
+                         L"%ls\\%ls", directory,
+                         JVMAN_WINDOWS_INSTALL_MARKER);
+    if (written < 0 ||
+        (size_t)written >= sizeof(marker_path) / sizeof(marker_path[0])) {
+        platform_set_error("registered jvman marker path is too long");
+        return -1;
+    }
+    attributes = GetFileAttributesW(marker_path);
+    if (attributes == INVALID_FILE_ATTRIBUTES ||
+        (attributes & (FILE_ATTRIBUTE_DIRECTORY |
+                       FILE_ATTRIBUTE_REPARSE_POINT)) != 0) {
+        platform_set_error("the registered jvman install marker is missing or unsafe");
+        return -1;
+    }
+    marker = CreateFileW(marker_path, GENERIC_READ, FILE_SHARE_READ, NULL,
+                         OPEN_EXISTING,
+                         FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT |
+                             FILE_FLAG_SEQUENTIAL_SCAN,
+                         NULL);
+    if (marker == INVALID_HANDLE_VALUE ||
+        !ReadFile(marker, bytes, sizeof(bytes), &read_count, NULL) ||
+        (read_count == sizeof(bytes) &&
+         (!ReadFile(marker, &extra, 1u, &extra_count, NULL) ||
+          extra_count != 0u))) {
+        if (marker != INVALID_HANDLE_VALUE) CloseHandle(marker);
+        platform_set_windows_error("cannot read the registered jvman install marker");
+        return -1;
+    }
+    CloseHandle(marker);
+    if (read_count == 0u || (read_count % sizeof(WCHAR)) != 0u) {
+        platform_set_error("the registered jvman install marker is invalid");
+        return -1;
+    }
+    characters = (size_t)read_count / sizeof(WCHAR);
+    if (characters >= JVMAN_WINDOWS_INSTALL_ID_CHARS ||
+        characters != wcslen(install_id)) {
+        platform_set_error("the registered jvman install marker does not match metadata");
+        return -1;
+    }
+    for (index = 0u; index < characters; ++index) {
+        WCHAR value;
+        memcpy(&value, bytes + index * sizeof(WCHAR), sizeof(value));
+        if (value == L'\0' || towlower(value) != towlower(install_id[index])) {
+            result = 0;
+            break;
+        }
+    }
+    if (index == characters) result = 1;
+    if (result != 1) {
+        platform_set_error("the registered jvman install marker does not match metadata");
+        return -1;
+    }
+    return 1;
+}
+
+static int windows_installer_identity_matches(
+    HKEY root, const WCHAR *directory, WindowsInstallerIdentity *identity_out) {
+    HKEY installer_key = NULL;
+    HKEY state_key = NULL;
+    HKEY selected_key;
+    WindowsInstallerIdentity identity;
+    DWORD active_state = 0;
+    DWORD type = 0;
+    DWORD bytes = sizeof(active_state);
+    LSTATUS status;
+    int install_dir_present;
+    int result = -1;
+    if (!root || !directory || !*directory || !identity_out) return -1;
+    memset(&identity, 0, sizeof(identity));
+    status = RegOpenKeyExW(root, JVMAN_WINDOWS_INSTALLER_KEY, 0,
+                           KEY_QUERY_VALUE, &installer_key);
+    if (status == ERROR_FILE_NOT_FOUND || status == ERROR_PATH_NOT_FOUND) {
+        return 0;
+    }
+    if (status != ERROR_SUCCESS) {
+        SetLastError((DWORD)status);
+        platform_set_windows_error("cannot open jvman installer metadata");
+        return -1;
+    }
+    status = RegGetValueW(installer_key, NULL, JVMAN_WINDOWS_ACTIVE_STATE,
+                          RRF_RT_REG_DWORD | RRF_ZEROONFAILURE, &type,
+                          &active_state, &bytes);
+    if (status == ERROR_FILE_NOT_FOUND || status == ERROR_PATH_NOT_FOUND) {
+        selected_key = installer_key;
+    } else if (status != ERROR_SUCCESS || type != REG_DWORD ||
+               bytes != sizeof(active_state) || active_state > 1u) {
+        platform_set_error("the registered jvman installer metadata is invalid");
+        goto done;
+    } else {
+        const WCHAR *state_name = active_state == 0u
+                                      ? JVMAN_WINDOWS_INSTALLER_STATE_0
+                                      : JVMAN_WINDOWS_INSTALLER_STATE_1;
+        status = RegOpenKeyExW(installer_key, state_name, 0, KEY_QUERY_VALUE,
+                               &state_key);
+        if (status != ERROR_SUCCESS) {
+            platform_set_error("the registered jvman installer metadata is invalid");
+            goto done;
+        }
+        selected_key = state_key;
+    }
+
+    install_dir_present = windows_query_metadata_string(
+        selected_key, JVMAN_WINDOWS_INSTALL_DIR, identity.install_dir,
+        sizeof(identity.install_dir) / sizeof(identity.install_dir[0]));
+    if (install_dir_present == 0) {
+        result = 0;
+        goto done;
+    }
+    if (install_dir_present < 0 ||
+        !windows_metadata_path_valid(identity.install_dir)) {
+        platform_set_error("the registered jvman installer metadata is invalid");
+        goto done;
+    }
+    if (_wcsicmp(identity.install_dir, directory) != 0) {
+        result = 0;
+        goto done;
+    }
+    if (windows_query_metadata_string(
+            selected_key, JVMAN_WINDOWS_DATA_HOME, identity.data_home,
+            sizeof(identity.data_home) / sizeof(identity.data_home[0])) != 1 ||
+        windows_query_metadata_string(
+            selected_key, JVMAN_WINDOWS_INSTALL_ID, identity.install_id,
+            sizeof(identity.install_id) / sizeof(identity.install_id[0])) != 1 ||
+        !windows_metadata_path_valid(identity.data_home) ||
+        !windows_install_id_valid(identity.install_id) ||
+        windows_marker_matches(identity.install_dir, identity.install_id) != 1) {
+        platform_set_error("the registered jvman installer metadata is invalid");
+        goto done;
+    }
+    *identity_out = identity;
+    result = 1;
+
+done:
+    if (state_key) RegCloseKey(state_key);
+    if (installer_key) RegCloseKey(installer_key);
+    return result;
+}
+
+static int windows_machine_install_identity_matches(
+    const WindowsInstallerIdentity *identity) {
+    WCHAR program_files[JVMAN_PATH_MAX];
+    WCHAR program_data[JVMAN_PATH_MAX];
+    WCHAR expected_install[JVMAN_PATH_MAX];
+    WCHAR expected_data[JVMAN_PATH_MAX];
+    size_t length;
+    int written;
+    if (!identity ||
+        SHGetFolderPathW(NULL, CSIDL_PROGRAM_FILES | CSIDL_FLAG_DONT_VERIFY,
+                         NULL, SHGFP_TYPE_CURRENT, program_files) != S_OK ||
+        SHGetFolderPathW(NULL, CSIDL_COMMON_APPDATA | CSIDL_FLAG_DONT_VERIFY,
+                         NULL, SHGFP_TYPE_CURRENT, program_data) != S_OK) {
+        platform_set_error("cannot determine protected machine install paths");
+        return -1;
+    }
+    length = wcslen(program_files);
+    while (length > 3u && (program_files[length - 1u] == L'\\' ||
+                           program_files[length - 1u] == L'/')) {
+        program_files[--length] = L'\0';
+    }
+    length = wcslen(program_data);
+    while (length > 3u && (program_data[length - 1u] == L'\\' ||
+                           program_data[length - 1u] == L'/')) {
+        program_data[--length] = L'\0';
+    }
+    written = _snwprintf(expected_install,
+                         sizeof(expected_install) / sizeof(expected_install[0]),
+                         L"%ls\\jvman", program_files);
+    if (written < 0 ||
+        (size_t)written >=
+            sizeof(expected_install) / sizeof(expected_install[0])) {
+        platform_set_error("protected jvman install path is too long");
+        return -1;
+    }
+    written = _snwprintf(expected_data,
+                         sizeof(expected_data) / sizeof(expected_data[0]),
+                         L"%ls\\jvman", program_data);
+    if (written < 0 ||
+        (size_t)written >= sizeof(expected_data) / sizeof(expected_data[0])) {
+        platform_set_error("protected jvman data path is too long");
+        return -1;
+    }
+    return _wcsicmp(identity->install_dir, expected_install) == 0 &&
+                   _wcsicmp(identity->data_home, expected_data) == 0
+               ? 1
+               : 0;
+}
+
+static int windows_machine_install_directory_matches(
+    const WCHAR *directory) {
+    WCHAR program_files[JVMAN_PATH_MAX];
+    WCHAR expected[JVMAN_PATH_MAX];
+    size_t length;
+    int written;
+    if (!directory || !*directory ||
+        SHGetFolderPathW(NULL, CSIDL_PROGRAM_FILES | CSIDL_FLAG_DONT_VERIFY,
+                         NULL, SHGFP_TYPE_CURRENT, program_files) != S_OK) {
+        platform_set_error("cannot determine the protected Program Files directory");
+        return -1;
+    }
+    length = wcslen(program_files);
+    while (length > 3u && (program_files[length - 1u] == L'\\' ||
+                           program_files[length - 1u] == L'/')) {
+        program_files[--length] = L'\0';
+    }
+    written = _snwprintf(expected, sizeof(expected) / sizeof(expected[0]),
+                         L"%ls\\jvman", program_files);
+    if (written < 0 ||
+        (size_t)written >= sizeof(expected) / sizeof(expected[0])) {
+        platform_set_error("protected jvman install path is too long");
+        return -1;
+    }
+    return _wcsicmp(directory, expected) == 0 ? 1 : 0;
+}
+#endif
+
+int platform_launch_jvman_uninstaller(void) {
+#if defined(_WIN32)
+    WCHAR module[JVMAN_PATH_MAX];
+    WCHAR directory[JVMAN_PATH_MAX];
+    WCHAR uninstaller[JVMAN_PATH_MAX];
+    WCHAR command_line[JVMAN_PATH_MAX + 64];
+    WCHAR *separator;
+    char uninstaller_utf8[JVMAN_PATH_MAX];
+    WindowsInstallerIdentity identity;
+    DWORD module_length;
+    DWORD attributes;
+    int machine_scope;
+    int protected_machine_directory;
+    int metadata_match;
+    int written;
+    HANDLE uninstaller_guard = INVALID_HANDLE_VALUE;
+    BY_HANDLE_FILE_INFORMATION uninstaller_info;
+    STARTUPINFOW startup;
+    PROCESS_INFORMATION process;
+
+    module_length = GetModuleFileNameW(
+        NULL, module, (DWORD)(sizeof(module) / sizeof(module[0])));
+    if (module_length == 0 ||
+        module_length >= sizeof(module) / sizeof(module[0])) {
+        platform_set_windows_error("cannot locate the running executable");
+        return -1;
+    }
+    memcpy(directory, module, ((size_t)module_length + 1u) * sizeof(WCHAR));
+    separator = wcsrchr(directory, L'\\');
+    if (!separator || _wcsicmp(separator + 1, L"jvman.exe") != 0) {
+        platform_set_error(
+            "the running executable is not a registered jvman installation");
+        return -1;
+    }
+    *separator = L'\0';
+
+    protected_machine_directory =
+        windows_machine_install_directory_matches(directory);
+    if (protected_machine_directory < 0) return -1;
+    machine_scope = protected_machine_directory == 1;
+    metadata_match = windows_installer_identity_matches(
+        machine_scope ? HKEY_LOCAL_MACHINE : HKEY_CURRENT_USER,
+        directory, &identity);
+    if (metadata_match != 1) {
+        if (metadata_match == 0) {
+            platform_set_error(
+                "the running executable is not a registered jvman installation");
+        }
+        return -1;
+    }
+    if (machine_scope) {
+        attributes = GetFileAttributesW(directory);
+        if (windows_machine_install_identity_matches(&identity) != 1 ||
+            attributes == INVALID_FILE_ATTRIBUTES ||
+            (attributes & (FILE_ATTRIBUTE_DIRECTORY |
+                           FILE_ATTRIBUTE_REPARSE_POINT)) !=
+                FILE_ATTRIBUTE_DIRECTORY) {
+            platform_set_error(
+                "the machine-wide jvman install directory is not protected");
+            return -1;
+        }
+    }
+    written = _snwprintf(uninstaller,
+                         sizeof(uninstaller) / sizeof(uninstaller[0]),
+                         L"%ls\\%ls", identity.install_dir,
+                         JVMAN_WINDOWS_UNINSTALLER);
+    if (written < 0 ||
+        (size_t)written >= sizeof(uninstaller) / sizeof(uninstaller[0])) {
+        platform_set_error("registered uninstaller path is too long");
+        return -1;
+    }
+    attributes = GetFileAttributesW(uninstaller);
+    if (attributes == INVALID_FILE_ATTRIBUTES ||
+        (attributes & (FILE_ATTRIBUTE_DIRECTORY |
+                       FILE_ATTRIBUTE_REPARSE_POINT)) != 0) {
+        platform_set_error("registered jvman uninstaller is missing or unsafe");
+        return -1;
+    }
+    uninstaller_guard = CreateFileW(
+        uninstaller, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+    if (uninstaller_guard == INVALID_HANDLE_VALUE) {
+        platform_set_windows_error(
+            "cannot lock the registered jvman uninstaller for launch");
+        return -1;
+    }
+    if (!GetFileInformationByHandle(uninstaller_guard, &uninstaller_info)) {
+        DWORD error = GetLastError();
+        CloseHandle(uninstaller_guard);
+        SetLastError(error);
+        platform_set_windows_error(
+            "cannot inspect the registered jvman uninstaller");
+        return -1;
+    }
+    if ((uninstaller_info.dwFileAttributes &
+         (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) != 0) {
+        CloseHandle(uninstaller_guard);
+        platform_set_error("registered jvman uninstaller is unsafe");
+        return -1;
+    }
+    if (platform_copy_wide_to_utf8(uninstaller, uninstaller_utf8,
+                                   sizeof(uninstaller_utf8)) != 0 ||
+        platform_validate_executable_image(uninstaller_utf8) != 0) {
+        CloseHandle(uninstaller_guard);
+        return -1;
+    }
+    written = _snwprintf(
+        command_line, sizeof(command_line) / sizeof(command_line[0]),
+        machine_scope ? L"\"%ls\" /UNINSTALL /MACHINE"
+                      : L"\"%ls\" /UNINSTALL",
+        uninstaller);
+    if (written < 0 ||
+        (size_t)written >= sizeof(command_line) / sizeof(command_line[0])) {
+        CloseHandle(uninstaller_guard);
+        platform_set_error("registered uninstaller command is too long");
+        return -1;
+    }
+    memset(&startup, 0, sizeof(startup));
+    startup.cb = sizeof(startup);
+    memset(&process, 0, sizeof(process));
+    if (!CreateProcessW(uninstaller, command_line, NULL, NULL, FALSE,
+                        CREATE_NEW_PROCESS_GROUP | CREATE_UNICODE_ENVIRONMENT,
+                        NULL, directory, &startup, &process)) {
+        CloseHandle(uninstaller_guard);
+        platform_set_windows_error(
+            "cannot start the registered jvman uninstaller");
+        return -1;
+    }
+    CloseHandle(uninstaller_guard);
+    CloseHandle(process.hThread);
+    CloseHandle(process.hProcess);
+    return 0;
+#else
+    platform_set_error("self-uninstall is only supported on Windows");
     return -1;
 #endif
 }

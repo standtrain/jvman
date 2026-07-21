@@ -762,6 +762,14 @@ done:
     return result;
 }
 
+int jvman_uninstall_run_cli(void) {
+    if (platform_launch_jvman_uninstaller() != 0) {
+        return print_platform_error("cannot start jvman uninstaller");
+    }
+    puts("The jvman uninstaller was started.");
+    return 0;
+}
+
 static int command_exec(const JvmanContext *context, const char *name, char **command) {
     JvmanRegistration registration;
     char bin[JVMAN_PATH_MAX];
@@ -1675,6 +1683,7 @@ static void print_usage(void) {
     puts("  jvman current");
     puts("  jvman which [name]");
     puts("  jvman remove <name>");
+    puts("  jvman uninstall [<name>]");
     puts("  jvman exec <name> [--] <command> [args...]");
     puts("  jvman init [powershell|cmd|sh]");
     puts("  jvman doctor");
@@ -1736,9 +1745,14 @@ int jvman_run(JvmanContext *context, int argc, char **argv) {
     if (strcmp(command, "which") == 0)
         return argc <= 3 ? command_which(context, argc == 3 ? argv[2] : NULL) :
                print_error("usage: jvman which [name]");
-    if (strcmp(command, "remove") == 0 || strcmp(command, "uninstall") == 0)
+    if (strcmp(command, "remove") == 0)
         return argc == 3 ? command_remove(context, argv[2]) :
                print_error("usage: jvman remove <name>");
+    if (strcmp(command, "uninstall") == 0) {
+        if (argc == 2) return jvman_uninstall_run_cli();
+        if (argc == 3) return command_remove(context, argv[2]);
+        return print_error("usage: jvman uninstall [<name>]");
+    }
     if (strcmp(command, "exec") == 0) {
         int command_index = 3;
         if (argc > 3 && strcmp(argv[3], "--") == 0) command_index = 4;

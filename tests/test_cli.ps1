@@ -18,6 +18,8 @@ $oldProgramFilesX86 = [Environment]::GetEnvironmentVariable('ProgramFiles(x86)',
 $oldLocalAppData = $env:LOCALAPPDATA
 $oldUserProfile = $env:USERPROFILE
 $oldDiscoveryJavaBin = $env:JVMAN_TEST_JAVA_BIN
+$installerRegistryPath = 'Registry::HKEY_CURRENT_USER\Software\jvman\Installer'
+$installerKeyExisted = Test-Path -LiteralPath $installerRegistryPath
 $duplicateJunction = $null
 try {
     $bufferSize = $Host.UI.RawUI.BufferSize
@@ -46,6 +48,23 @@ function Invoke-JvmanExpectFailure {
     $exitCode = $LASTEXITCODE
     $ErrorActionPreference = 'Stop'
     if ($exitCode -eq 0) { throw "jvman $($Arguments -join ' ') unexpectedly succeeded" }
+}
+
+function Invoke-NativeCapture {
+    param(
+        [string]$Path,
+        [Parameter(ValueFromRemainingArguments = $true)][string[]]$Arguments
+    )
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        $output = @(& $Path @Arguments 2>&1)
+        $exitCode = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+    return [pscustomobject]@{ Output = $output; ExitCode = $exitCode }
 }
 
 function New-FakeJdk {
@@ -87,6 +106,76 @@ function Get-RegistrationContent([string]$Name) {
 }
 
 try {
+    $uninstallProbeDir = Join-Path $testRoot 'uninstall command probe'
+    $uninstallProbe = Join-Path $uninstallProbeDir 'jvman.exe'
+    New-Item -ItemType Directory -Force -Path $uninstallProbeDir | Out-Null
+    Copy-Item -LiteralPath $binaryPath -Destination $uninstallProbe
+    $uninstallProbeResult = Invoke-NativeCapture $uninstallProbe uninstall
+    if ($uninstallProbeResult.ExitCode -eq 0 -or
+        ($uninstallProbeResult.Output -join "`n") -notmatch
+            'cannot start jvman uninstaller') {
+        throw 'an unregistered executable copy reached the self-uninstall path'
+    }
+
+    if (-not $installerKeyExisted) {
+        $registeredProbeDir = Join-Path $testRoot 'registered uninstall probe'
+        $registeredProbeData = Join-Path $testRoot 'registered uninstall data'
+        $registeredProbe = Join-Path $registeredProbeDir 'jvman.exe'
+        $registeredUninstaller = Join-Path $registeredProbeDir 'uninstall.exe'
+        $registeredMarker = Join-Path $registeredProbeDir 'install.marker'
+        $registeredId = 'cli-test-' + [Guid]::NewGuid().ToString('N')
+        $probeStatePath = "$installerRegistryPath\State0"
+        New-Item -ItemType Directory -Force -Path $registeredProbeDir | Out-Null
+        New-Item -ItemType Directory -Force -Path $registeredProbeData | Out-Null
+        Copy-Item -LiteralPath $binaryPath -Destination $registeredProbe
+        Copy-Item -LiteralPath $binaryPath -Destination $registeredUninstaller
+        [IO.File]::WriteAllBytes(
+            $registeredMarker,
+            [Text.Encoding]::Unicode.GetBytes($registeredId))
+        New-Item -Path $installerRegistryPath -Force | Out-Null
+        try {
+            New-ItemProperty -Path $installerRegistryPath -Name Version `
+                -Value '0.2.0' -PropertyType String -Force | Out-Null
+            New-ItemProperty -Path $installerRegistryPath -Name InstallDir `
+                -Value $registeredProbeDir -PropertyType String -Force | Out-Null
+            New-ItemProperty -Path $installerRegistryPath -Name DataHome `
+                -Value $registeredProbeData -PropertyType String -Force | Out-Null
+            New-ItemProperty -Path $installerRegistryPath -Name InstallId `
+                -Value $registeredId -PropertyType String -Force | Out-Null
+            $legacyResult = Invoke-NativeCapture $registeredProbe uninstall
+            if ($legacyResult.ExitCode -ne 0) {
+                throw 'legacy metadata without ARP did not launch the uninstaller'
+            }
+
+            New-Item -Path $probeStatePath -Force | Out-Null
+            New-ItemProperty -Path $probeStatePath -Name Version `
+                -Value '0.2.0' -PropertyType String -Force | Out-Null
+            New-ItemProperty -Path $probeStatePath -Name InstallDir `
+                -Value $registeredProbeDir -PropertyType String -Force | Out-Null
+            New-ItemProperty -Path $probeStatePath -Name DataHome `
+                -Value $registeredProbeData -PropertyType String -Force | Out-Null
+            New-ItemProperty -Path $probeStatePath -Name InstallId `
+                -Value $registeredId -PropertyType String -Force | Out-Null
+            New-ItemProperty -Path $installerRegistryPath -Name ActiveState `
+                -Value 0 -PropertyType DWord -Force | Out-Null
+            $atomicResult = Invoke-NativeCapture $registeredProbe uninstall
+            if ($atomicResult.ExitCode -ne 0) {
+                throw 'atomic metadata without ARP did not launch the uninstaller'
+            }
+
+            [IO.File]::WriteAllBytes(
+                $registeredMarker,
+                [Text.Encoding]::Unicode.GetBytes('different-install-id'))
+            $mismatchedResult = Invoke-NativeCapture $registeredProbe uninstall
+            if ($mismatchedResult.ExitCode -eq 0) {
+                throw 'jvman uninstall accepted a marker that did not match metadata'
+            }
+        }
+        finally {
+            Remove-Item -LiteralPath $installerRegistryPath -Recurse -Force
+        }
+    }
+
     $userHome = Join-Path $testRoot 'user home'
     $localAppData = Join-Path $testRoot 'local app data'
     $programFiles = Join-Path $localAppData 'Programs'
@@ -367,11 +456,19 @@ try {
 
     $jdkA = Join-Path $testRoot 'fixtures\jdk-a'
     $jdkB = Join-Path $testRoot 'fixtures\jdk-b'
+    $legacyUninstallJdk = Join-Path $testRoot 'fixtures\jdk-legacy-uninstall'
     New-FakeJdk $jdkA 'a'
     New-FakeJdk $jdkB 'b'
+    New-FakeJdk $legacyUninstallJdk 'legacy-uninstall'
 
     Invoke-Jvman add a $jdkA | Out-Null
     Invoke-Jvman add b $jdkB | Out-Null
+    Invoke-Jvman add legacy-uninstall $legacyUninstallJdk | Out-Null
+    Invoke-Jvman uninstall legacy-uninstall | Out-Null
+    if ((Test-Path -LiteralPath (Join-Path $stateRoot 'versions\legacy-uninstall.conf')) -or
+        -not (Test-Path -LiteralPath (Join-Path $legacyUninstallJdk 'bin\javac.exe'))) {
+        throw 'uninstall <name> no longer preserves the JDK removal alias'
+    }
     $list = (Invoke-Jvman list) -join "`n"
     if ($list -notmatch 'a' -or $list -notmatch 'b') { throw 'list did not show both JDKs' }
 

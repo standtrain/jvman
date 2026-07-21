@@ -19,6 +19,9 @@ int main(int argc, char **argv) {
     if (argc >= 2 && argv && argv[1] && strcmp(argv[1], "update") == 0) {
         return jvman_update_run_cli(argc, argv);
     }
+    if (argc == 2 && argv && argv[1] && strcmp(argv[1], "uninstall") == 0) {
+        return jvman_uninstall_run_cli();
+    }
     if (jvman_context_init(&context) != 0) {
         fprintf(stderr, "jvman: cannot initialize paths: %s\n", platform_last_error());
         return 1;

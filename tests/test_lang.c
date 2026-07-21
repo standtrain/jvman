@@ -68,8 +68,12 @@ int main(void) {
                  L"System default") == 0);
     CHECK(jvman_lang_set((JvmanInstallerLang)-1) != 0);
     CHECK(wcscmp(jvman_lang_str(JVMAN_STR_APP_TITLE), L"jvman Setup") == 0);
+    CHECK(wcsstr(jvman_lang_str(JVMAN_STR_UNINSTALL_CONFIRM_FINAL),
+                 L"final confirmation") != NULL);
     CHECK(jvman_lang_set(JVMAN_LANG_ZH_CN) == 0);
     CHECK(wcscmp(jvman_lang_str(JVMAN_STR_LANG_SYSTEM), L"跟随系统") == 0);
+    CHECK(wcsstr(jvman_lang_str(JVMAN_STR_UNINSTALL_CONFIRM_FINAL),
+                 L"再次确认") != NULL);
     CHECK(jvman_lang_str((JvmanStringId)-1)[0] == L'\0');
     CHECK(jvman_lang_str(JVMAN_STR_COUNT)[0] == L'\0');
     jvman_lang_use_system_default();

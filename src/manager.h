@@ -18,5 +18,6 @@ typedef struct JvmanContext {
 
 int jvman_context_init(JvmanContext *context);
 int jvman_run(JvmanContext *context, int argc, char **argv);
+int jvman_uninstall_run_cli(void);
 
 #endif

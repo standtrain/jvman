@@ -50,6 +50,8 @@ int platform_https_download_timeout(const char *url, const char *destination,
 int platform_https_probe(const char *url, size_t sample_size,
                          unsigned int timeout_seconds);
 int platform_current_executable(char *out, size_t out_size);
+/* Starts the registered Windows uninstaller without waiting for it. */
+int platform_launch_jvman_uninstaller(void);
 int platform_sha256_file(const char *path, unsigned char digest[32]);
 int platform_validate_executable_image(const char *path);
 int platform_stage_executable_update(const char *source, const char *target,

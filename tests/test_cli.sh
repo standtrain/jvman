@@ -6,6 +6,10 @@ test_root=${TMPDIR:-/tmp}/jvman-test-$$
 state_root=$test_root/state
 trap 'rm -rf "$test_root"' EXIT INT TERM
 export JVMAN_HOME=$state_root
+if "$binary" uninstall >/dev/null 2>&1; then
+    echo 'non-Windows self-uninstall unexpectedly succeeded' >&2
+    exit 1
+fi
 
 make_jdk() {
     mkdir -p "$1/bin"
@@ -205,8 +209,13 @@ fi
 
 make_jdk "$test_root/fixtures/jdk-a"
 make_jdk "$test_root/fixtures/jdk-b"
+make_jdk "$test_root/fixtures/jdk-legacy-uninstall"
 "$binary" add a "$test_root/fixtures/jdk-a"
 "$binary" add b "$test_root/fixtures/jdk-b"
+"$binary" add legacy-uninstall "$test_root/fixtures/jdk-legacy-uninstall"
+"$binary" uninstall legacy-uninstall
+test ! -e "$state_root/versions/legacy-uninstall.conf"
+test -f "$test_root/fixtures/jdk-legacy-uninstall/bin/javac"
 use_output=$("$binary" use a)
 printf '%s\n' "$use_output" | grep -F 'jvman init' >/dev/null
 test "$("$binary" current)" = a
