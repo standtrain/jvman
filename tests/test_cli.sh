@@ -6,10 +6,40 @@ test_root=${TMPDIR:-/tmp}/jvman-test-$$
 state_root=$test_root/state
 trap 'rm -rf "$test_root"' EXIT INT TERM
 export JVMAN_HOME=$state_root
+export JVMAN_LANG=en
+
+zh_help=$(JVMAN_LANG=zh-CN "$binary")
+printf '%s\n' "$zh_help" | grep -F '轻量级 Java 版本管理器' >/dev/null
+printf '%s\n' "$zh_help" | grep -F '使用方法' >/dev/null
+printf '%s\n' "$zh_help" | grep -F '  jvman uninstall [<名称>]' >/dev/null
+en_help=$(JVMAN_LANG=en "$binary")
+printf '%s\n' "$en_help" | grep -F 'lightweight Java version manager' >/dev/null
+printf '%s\n' "$en_help" | grep -F 'Usage:' >/dev/null
+printf '%s\n' "$en_help" | grep -F '  jvman uninstall [<name>]' >/dev/null
 if "$binary" uninstall >/dev/null 2>&1; then
     echo 'non-Windows self-uninstall unexpectedly succeeded' >&2
     exit 1
 fi
+JVMAN_LANG=zh-CN "$binary" language --list | grep -F '简体中文' >/dev/null
+if JVMAN_LANG=en "$binary" language zh-CN >/dev/null 2>&1; then
+    echo 'non-Windows language command unexpectedly persisted a setting' >&2
+    exit 1
+fi
+if zh_source_usage=$(JVMAN_LANG=zh-CN "$binary" source --list extra 2>&1); then
+    echo 'invalid source usage unexpectedly succeeded' >&2
+    exit 1
+fi
+printf '%s\n' "$zh_source_usage" | grep -F \
+    '用法：jvman source [--list|--reset|<名称>|add <名称> <HTTPS模板>|remove <名称>]' \
+    >/dev/null
+if zh_source_url=$(JVMAN_LANG=zh-CN "$binary" source add invalid-url \
+        'http://example.test/{major}' 2>&1); then
+    echo 'invalid custom source URL unexpectedly succeeded' >&2
+    exit 1
+fi
+printf '%s\n' "$zh_source_url" | grep -F \
+    '自定义下载源 URL 必须使用 HTTPS 并包含 {major}；支持的占位符为 {major}、{os}、{arch} 和 {archive}' \
+    >/dev/null
 
 make_jdk() {
     mkdir -p "$1/bin"
@@ -159,11 +189,13 @@ while test "$limit_index" -lt 32; do
         "$limit_index" > "$state_root/sources/limit${limit_index}.conf"
     limit_index=$((limit_index + 1))
 done
-if "$binary" source add overflow 'https://overflow.example.test/{major}' \
-        >/dev/null 2>&1; then
+if zh_source_limit=$(JVMAN_LANG=zh-CN "$binary" source add overflow \
+        'https://overflow.example.test/{major}' 2>&1); then
     echo 'source add exceeded the custom source limit' >&2
     exit 1
 fi
+printf '%s\n' "$zh_source_limit" | grep -F \
+    '自定义下载源数量已达上限' >/dev/null
 test ! -e "$state_root/sources/overflow.conf"
 rm "$state_root"/sources/limit*.conf
 
@@ -172,6 +204,8 @@ rm "$state_root"/sources/limit*.conf
 registered_preview=$("$binary" discover)
 printf '%s\n' "$registered_preview" | grep -F "$discovered_a" |
     grep -F 'registered:manual-discovered' >/dev/null
+JVMAN_LANG=zh-CN "$binary" discover |
+    grep -F '已注册:manual-discovered' >/dev/null
 "$binary" discover --register
 test "$("$binary" which manual-discovered)" = "$discovered_a"
 test "$("$binary" which "$discovery_name_2")" = "$discovered_b"

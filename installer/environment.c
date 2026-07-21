@@ -10,6 +10,11 @@
 #include <stdlib.h>
 #include <string.h>
 
+static int valid_environment_scope(uint32_t scope) {
+    return scope == (uint32_t)JVMAN_ENV_SCOPE_USER ||
+           scope == (uint32_t)JVMAN_ENV_SCOPE_MACHINE;
+}
+
 #if defined(_WIN32)
 
 #include "pathlist.h"
@@ -22,10 +27,15 @@
 #define JVMAN_INSTALLER_KEY L"Software\\jvman\\Installer"
 #define JVMAN_ARP_KEY L"Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\jvman"
 
+#define JVMAN_INSTALLER_STATE_0 L"State0"
+#define JVMAN_INSTALLER_STATE_1 L"State1"
+
+#define JVMAN_VALUE_ACTIVE_STATE L"ActiveState"
 #define JVMAN_VALUE_VERSION L"Version"
 #define JVMAN_VALUE_INSTALL_DIR L"InstallDir"
 #define JVMAN_VALUE_INSTALL_ID L"InstallId"
 #define JVMAN_VALUE_DATA_HOME L"DataHome"
+#define JVMAN_VALUE_LANGUAGE L"Language"
 #define JVMAN_VALUE_APP_PATH_OWNED L"AppPathOwned"
 #define JVMAN_VALUE_APP_PATH_SCOPE L"AppPathScope"
 #define JVMAN_VALUE_JAVA_PATH_OWNED L"JavaPathOwned"
@@ -71,16 +81,13 @@ static int valid_environment_type(uint32_t type) {
     return type == (uint32_t)REG_SZ || type == (uint32_t)REG_EXPAND_SZ;
 }
 
-static int valid_environment_scope(uint32_t scope) {
-    return scope == (uint32_t)JVMAN_ENV_SCOPE_USER ||
-           scope == (uint32_t)JVMAN_ENV_SCOPE_MACHINE;
-}
-
 static JvmanEnvironmentStatus map_registry_status(LSTATUS status) {
     if (status == ERROR_SUCCESS) return JVMAN_ENV_OK;
     if (status == ERROR_FILE_NOT_FOUND) return JVMAN_ENV_NOT_FOUND;
     if (status == ERROR_MORE_DATA) return JVMAN_ENV_TOO_LONG;
-    if (status == ERROR_ACCESS_DENIED) return JVMAN_ENV_ACCESS_DENIED;
+    if (status == ERROR_ACCESS_DENIED || status == ERROR_PRIVILEGE_NOT_HELD) {
+        return JVMAN_ENV_ACCESS_DENIED;
+    }
     return JVMAN_ENV_WIN32_ERROR;
 }
 
@@ -277,7 +284,7 @@ static JvmanEnvironmentStatus open_environment_key(JvmanEnvironmentScope scope,
     } else {
         return JVMAN_ENV_INVALID_ARGUMENT;
     }
-    if (create) {
+    if (create && scope == JVMAN_ENV_SCOPE_USER) {
         result = RegCreateKeyExW(root, subkey, 0,
                                  NULL, REG_OPTION_NON_VOLATILE,
                                  access | KEY_CREATE_SUB_KEY, NULL, key_out,
@@ -289,28 +296,37 @@ static JvmanEnvironmentStatus open_environment_key(JvmanEnvironmentScope scope,
     return map_registry_status(result);
 }
 
-static JvmanEnvironmentStatus open_installer_key(DWORD access, int create,
+static JvmanEnvironmentStatus open_installer_key(JvmanEnvironmentScope scope,
+                                                  DWORD access, int create,
                                                   HKEY *key_out) {
     LSTATUS result;
+    HKEY root;
     if (!key_out) return JVMAN_ENV_INVALID_ARGUMENT;
     *key_out = NULL;
+    if (scope == JVMAN_ENV_SCOPE_USER) root = HKEY_CURRENT_USER;
+    else if (scope == JVMAN_ENV_SCOPE_MACHINE) root = HKEY_LOCAL_MACHINE;
+    else return JVMAN_ENV_INVALID_ARGUMENT;
     if (create) {
-        result = RegCreateKeyExW(HKEY_CURRENT_USER, JVMAN_INSTALLER_KEY, 0,
-                                 NULL, REG_OPTION_NON_VOLATILE,
+        result = RegCreateKeyExW(root, JVMAN_INSTALLER_KEY, 0, NULL,
+                                 REG_OPTION_NON_VOLATILE,
                                  access | KEY_CREATE_SUB_KEY, NULL, key_out,
                                  NULL);
     } else {
-        result = RegOpenKeyExW(HKEY_CURRENT_USER, JVMAN_INSTALLER_KEY, 0,
-                               access, key_out);
+        result = RegOpenKeyExW(root, JVMAN_INSTALLER_KEY, 0, access, key_out);
     }
     return map_registry_status(result);
 }
 
-static JvmanEnvironmentStatus open_arp_key(DWORD access, HKEY *key_out) {
+static JvmanEnvironmentStatus open_arp_key(JvmanEnvironmentScope scope,
+                                           DWORD access, HKEY *key_out) {
     LSTATUS result;
+    HKEY root;
     if (!key_out) return JVMAN_ENV_INVALID_ARGUMENT;
     *key_out = NULL;
-    result = RegCreateKeyExW(HKEY_CURRENT_USER, JVMAN_ARP_KEY, 0, NULL,
+    if (scope == JVMAN_ENV_SCOPE_USER) root = HKEY_CURRENT_USER;
+    else if (scope == JVMAN_ENV_SCOPE_MACHINE) root = HKEY_LOCAL_MACHINE;
+    else return JVMAN_ENV_INVALID_ARGUMENT;
+    result = RegCreateKeyExW(root, JVMAN_ARP_KEY, 0, NULL,
                              REG_OPTION_NON_VOLATILE,
                              access | KEY_CREATE_SUB_KEY, NULL, key_out,
                              NULL);
@@ -435,6 +451,11 @@ static JvmanEnvironmentStatus metadata_validate(
     status = validate_metadata_text(metadata->data_home,
                                     JVMAN_METADATA_TEXT_MAX_CHARS);
     if (status != JVMAN_ENV_OK) return status;
+    if (metadata->language) {
+        status = validate_metadata_text(
+            metadata->language, JVMAN_LANGUAGE_TAG_MAX_CHARS + 1u);
+        if (status != JVMAN_ENV_OK) return status;
+    }
     if ((metadata->app_path_owned != 0 && metadata->app_path_owned != 1) ||
         (metadata->java_path_owned != 0 && metadata->java_path_owned != 1) ||
         (metadata->java_home_owned != 0 && metadata->java_home_owned != 1) ||
@@ -502,180 +523,44 @@ static JvmanEnvironmentStatus metadata_query_string(
     return JVMAN_ENV_OK;
 }
 
-#endif /* _WIN32 */
+static JvmanEnvironmentStatus metadata_legacy_values_present(
+    HKEY key, int *present_out) {
+    static const wchar_t *const names[] = {
+        JVMAN_VALUE_VERSION,
+        JVMAN_VALUE_INSTALL_DIR,
+        JVMAN_VALUE_INSTALL_ID,
+        JVMAN_VALUE_DATA_HOME,
+        JVMAN_VALUE_APP_PATH_OWNED,
+        JVMAN_VALUE_APP_PATH_SCOPE,
+        JVMAN_VALUE_JAVA_PATH_OWNED,
+        JVMAN_VALUE_JAVA_PATH_SCOPE,
+        JVMAN_VALUE_JAVA_HOME_OWNED,
+        JVMAN_VALUE_JAVA_HOME_PRIOR_PRESENT,
+        JVMAN_VALUE_JAVA_HOME_PRIOR_TYPE,
+        JVMAN_VALUE_JAVA_HOME_PRIOR_VALUE,
+        JVMAN_VALUE_JAVA_HOME_MANAGED_VALUE
+    };
+    size_t index;
 
-const wchar_t *jvman_environment_status_message(JvmanEnvironmentStatus status) {
-    switch (status) {
-        case JVMAN_ENV_OK: return L"ok";
-        case JVMAN_ENV_NOT_FOUND: return L"not found";
-        case JVMAN_ENV_INVALID_ARGUMENT: return L"invalid argument";
-        case JVMAN_ENV_UNSUPPORTED_TYPE: return L"unsupported registry value type";
-        case JVMAN_ENV_TOO_LONG: return L"registry value is too long";
-        case JVMAN_ENV_NO_MEMORY: return L"out of memory";
-        case JVMAN_ENV_WIN32_ERROR: return L"Windows registry operation failed";
-        case JVMAN_ENV_ACCESS_DENIED:
-            return L"administrator permission is required for the selected environment change";
-        case JVMAN_ENV_METADATA_INVALID: return L"installer metadata is malformed";
-        case JVMAN_ENV_CONFLICT: return L"JAVA_HOME was changed by the user";
-        case JVMAN_ENV_UNSUPPORTED: return L"installer environment backend is unsupported";
-        default: return L"unknown environment error";
-    }
-}
-
-void jvman_installer_metadata_init(JvmanInstallerMetadata *metadata) {
-    if (!metadata) return;
-    memset(metadata, 0, sizeof(*metadata));
-}
-
-void jvman_installer_metadata_free(JvmanInstallerMetadata *metadata) {
-    if (!metadata) return;
-    free(metadata->version);
-    free(metadata->install_dir);
-    free(metadata->install_id);
-    free(metadata->data_home);
-    free(metadata->java_home_prior_value);
-    free(metadata->java_home_managed_value);
-    jvman_installer_metadata_init(metadata);
-}
-
-#if defined(_WIN32)
-
-JvmanEnvironmentStatus jvman_installer_metadata_load(
-    JvmanInstallerMetadata *metadata, int *found_out) {
-    JvmanInstallerMetadata loaded;
-    HKEY key = NULL;
-    JvmanEnvironmentStatus status;
-    int present;
-    uint32_t value;
-
-    if (!metadata || !found_out) return JVMAN_ENV_INVALID_ARGUMENT;
-    *found_out = 0;
-    jvman_installer_metadata_init(&loaded);
-    status = open_installer_key(KEY_QUERY_VALUE, 0, &key);
-    if (status == JVMAN_ENV_NOT_FOUND) {
-        jvman_installer_metadata_free(metadata);
-        return JVMAN_ENV_OK;
-    }
-    if (status != JVMAN_ENV_OK) return status;
-
-    status = metadata_query_string(key, JVMAN_VALUE_VERSION,
-                                   JVMAN_METADATA_TEXT_MAX_CHARS, 1,
-                                   &loaded.version, &present);
-    if (status == JVMAN_ENV_OK) {
-        status = metadata_query_string(key, JVMAN_VALUE_INSTALL_DIR,
-                                       JVMAN_METADATA_TEXT_MAX_CHARS, 1,
-                                       &loaded.install_dir, &present);
-    }
-    if (status == JVMAN_ENV_OK) {
-        status = metadata_query_string(key, JVMAN_VALUE_INSTALL_ID,
-                                       JVMAN_METADATA_TEXT_MAX_CHARS, 1,
-                                       &loaded.install_id, &present);
-    }
-    if (status == JVMAN_ENV_OK) {
-        status = metadata_query_string(key, JVMAN_VALUE_DATA_HOME,
-                                       JVMAN_METADATA_TEXT_MAX_CHARS, 1,
-                                       &loaded.data_home, &present);
-    }
-
-    if (status == JVMAN_ENV_OK) {
-        status = query_registry_dword(key, JVMAN_VALUE_APP_PATH_OWNED, 1,
-                                      &value, &present);
-        if (status == JVMAN_ENV_OK) {
-            if (value > 1u) status = JVMAN_ENV_METADATA_INVALID;
-            else loaded.app_path_owned = (int)value;
+    if (!key || !present_out) return JVMAN_ENV_INVALID_ARGUMENT;
+    *present_out = 0;
+    for (index = 0u; index < sizeof(names) / sizeof(names[0]); ++index) {
+        DWORD byte_count = 0;
+        LSTATUS result = RegQueryValueExW(key, names[index], NULL, NULL,
+                                          NULL, &byte_count);
+        if (result == ERROR_SUCCESS || result == ERROR_MORE_DATA) {
+            *present_out = 1;
+            return JVMAN_ENV_OK;
         }
+        if (result != ERROR_FILE_NOT_FOUND) return map_registry_status(result);
     }
-    if (status == JVMAN_ENV_OK) {
-        status = query_registry_dword(key, JVMAN_VALUE_APP_PATH_SCOPE, 0,
-                                      &value, &present);
-        if (status == JVMAN_ENV_OK && present) {
-            if (!valid_environment_scope(value)) status = JVMAN_ENV_METADATA_INVALID;
-            else loaded.app_path_scope = value;
-        }
-    }
-    if (status == JVMAN_ENV_OK) {
-        status = query_registry_dword(key, JVMAN_VALUE_JAVA_PATH_OWNED, 1,
-                                      &value, &present);
-        if (status == JVMAN_ENV_OK) {
-            if (value > 1u) status = JVMAN_ENV_METADATA_INVALID;
-            else loaded.java_path_owned = (int)value;
-        }
-    }
-    if (status == JVMAN_ENV_OK) {
-        status = query_registry_dword(key, JVMAN_VALUE_JAVA_PATH_SCOPE, 0,
-                                      &value, &present);
-        if (status == JVMAN_ENV_OK && present) {
-            if (!valid_environment_scope(value)) status = JVMAN_ENV_METADATA_INVALID;
-            else loaded.java_path_scope = value;
-        }
-    }
-    if (status == JVMAN_ENV_OK) {
-        status = query_registry_dword(key, JVMAN_VALUE_JAVA_HOME_OWNED, 1,
-                                      &value, &present);
-        if (status == JVMAN_ENV_OK) {
-            if (value > 1u) status = JVMAN_ENV_METADATA_INVALID;
-            else loaded.java_home_owned = (int)value;
-        }
-    }
-    if (status == JVMAN_ENV_OK) {
-        status = query_registry_dword(key, JVMAN_VALUE_JAVA_HOME_PRIOR_PRESENT,
-                                      1, &value, &present);
-        if (status == JVMAN_ENV_OK) {
-            if (value > 1u) status = JVMAN_ENV_METADATA_INVALID;
-            else loaded.java_home_prior_present = (int)value;
-        }
-    }
-    if (status == JVMAN_ENV_OK) {
-        status = query_registry_dword(key, JVMAN_VALUE_JAVA_HOME_PRIOR_TYPE,
-                                      1, &value, &present);
-        if (status == JVMAN_ENV_OK) loaded.java_home_prior_type = value;
-    }
-    if (status == JVMAN_ENV_OK) {
-        status = metadata_query_string(
-            key, JVMAN_VALUE_JAVA_HOME_PRIOR_VALUE,
-            JVMAN_ENV_VALUE_MAX_CHARS, 0, &loaded.java_home_prior_value,
-            &present);
-    }
-    if (status == JVMAN_ENV_OK) {
-        status = metadata_query_string(
-            key, JVMAN_VALUE_JAVA_HOME_MANAGED_VALUE,
-            JVMAN_ENV_VALUE_MAX_CHARS, loaded.java_home_owned,
-            &loaded.java_home_managed_value, &present);
-    }
-    RegCloseKey(key);
-    if (status != JVMAN_ENV_OK) {
-        jvman_installer_metadata_free(&loaded);
-        return status == JVMAN_ENV_UNSUPPORTED_TYPE
-                   ? JVMAN_ENV_METADATA_INVALID
-                   : status;
-    }
-    if (loaded.java_home_prior_present && !loaded.java_home_prior_value) {
-        jvman_installer_metadata_free(&loaded);
-        return JVMAN_ENV_METADATA_INVALID;
-    }
-    status = metadata_validate(&loaded);
-    if (status != JVMAN_ENV_OK) {
-        jvman_installer_metadata_free(&loaded);
-        return status == JVMAN_ENV_INVALID_ARGUMENT
-                   ? JVMAN_ENV_METADATA_INVALID
-                   : status;
-    }
-    jvman_installer_metadata_free(metadata);
-    *metadata = loaded;
-    *found_out = 1;
     return JVMAN_ENV_OK;
 }
 
-JvmanEnvironmentStatus jvman_installer_metadata_save(
-    const JvmanInstallerMetadata *metadata) {
-    HKEY key = NULL;
+static JvmanEnvironmentStatus metadata_write_key(
+    HKEY key, const JvmanInstallerMetadata *metadata) {
     JvmanEnvironmentStatus status;
     uint32_t prior_type;
-    if (!metadata) return JVMAN_ENV_INVALID_ARGUMENT;
-    status = metadata_validate(metadata);
-    if (status != JVMAN_ENV_OK) return status;
-    status = open_installer_key(KEY_SET_VALUE, 1, &key);
-    if (status != JVMAN_ENV_OK) return status;
 
     status = write_registry_string(key, JVMAN_VALUE_VERSION, metadata->version,
                                    REG_SZ, JVMAN_METADATA_TEXT_MAX_CHARS);
@@ -693,6 +578,13 @@ JvmanEnvironmentStatus jvman_installer_metadata_save(
         status = write_registry_string(key, JVMAN_VALUE_DATA_HOME,
                                        metadata->data_home, REG_SZ,
                                        JVMAN_METADATA_TEXT_MAX_CHARS);
+    }
+    if (status == JVMAN_ENV_OK && metadata->language) {
+        status = write_registry_string(
+            key, JVMAN_VALUE_LANGUAGE, metadata->language, REG_SZ,
+            JVMAN_LANGUAGE_TAG_MAX_CHARS + 1u);
+    } else if (status == JVMAN_ENV_OK) {
+        status = delete_registry_value(key, JVMAN_VALUE_LANGUAGE);
     }
     if (status == JVMAN_ENV_OK) {
         status = write_registry_dword(key, JVMAN_VALUE_APP_PATH_OWNED,
@@ -739,22 +631,345 @@ JvmanEnvironmentStatus jvman_installer_metadata_save(
                 metadata->java_home_prior_value, REG_SZ,
                 JVMAN_ENV_VALUE_MAX_CHARS);
         } else if (status == JVMAN_ENV_OK) {
-            status = delete_registry_value(key, JVMAN_VALUE_JAVA_HOME_PRIOR_VALUE);
+            status = delete_registry_value(
+                key, JVMAN_VALUE_JAVA_HOME_PRIOR_VALUE);
         }
     } else if (status == JVMAN_ENV_OK) {
-        status = delete_registry_value(key, JVMAN_VALUE_JAVA_HOME_MANAGED_VALUE);
+        status = delete_registry_value(key,
+                                       JVMAN_VALUE_JAVA_HOME_MANAGED_VALUE);
         if (status == JVMAN_ENV_OK) {
-            status = delete_registry_value(key, JVMAN_VALUE_JAVA_HOME_PRIOR_VALUE);
+            status = delete_registry_value(key,
+                                           JVMAN_VALUE_JAVA_HOME_PRIOR_VALUE);
         }
     }
-    RegCloseKey(key);
     return status;
 }
 
-JvmanEnvironmentStatus jvman_installer_metadata_delete(void) {
-    LSTATUS result = RegDeleteTreeW(HKEY_CURRENT_USER, JVMAN_INSTALLER_KEY);
+#endif /* _WIN32 */
+
+const wchar_t *jvman_environment_status_message(JvmanEnvironmentStatus status) {
+    switch (status) {
+        case JVMAN_ENV_OK: return L"ok";
+        case JVMAN_ENV_NOT_FOUND: return L"not found";
+        case JVMAN_ENV_INVALID_ARGUMENT: return L"invalid argument";
+        case JVMAN_ENV_UNSUPPORTED_TYPE: return L"unsupported registry value type";
+        case JVMAN_ENV_TOO_LONG: return L"registry value is too long";
+        case JVMAN_ENV_NO_MEMORY: return L"out of memory";
+        case JVMAN_ENV_WIN32_ERROR: return L"Windows registry operation failed";
+        case JVMAN_ENV_ACCESS_DENIED:
+            return L"administrator permission is required for the selected environment change";
+        case JVMAN_ENV_METADATA_INVALID: return L"installer metadata is malformed";
+        case JVMAN_ENV_CONFLICT: return L"JAVA_HOME was changed by the user";
+        case JVMAN_ENV_UNSUPPORTED: return L"installer environment backend is unsupported";
+        default: return L"unknown environment error";
+    }
+}
+
+void jvman_installer_metadata_init(JvmanInstallerMetadata *metadata) {
+    if (!metadata) return;
+    memset(metadata, 0, sizeof(*metadata));
+}
+
+void jvman_installer_metadata_free(JvmanInstallerMetadata *metadata) {
+    if (!metadata) return;
+    free(metadata->version);
+    free(metadata->install_dir);
+    free(metadata->install_id);
+    free(metadata->data_home);
+    free(metadata->language);
+    free(metadata->java_home_prior_value);
+    free(metadata->java_home_managed_value);
+    jvman_installer_metadata_init(metadata);
+}
+
+#if defined(_WIN32)
+
+JvmanEnvironmentStatus jvman_installer_metadata_load_scoped(
+    JvmanEnvironmentScope scope, JvmanInstallerMetadata *metadata,
+    int *found_out) {
+    JvmanInstallerMetadata loaded;
+    HKEY root_key = NULL;
+    HKEY state_key = NULL;
+    HKEY key;
+    JvmanEnvironmentStatus status;
+    int present;
+    int state_format = 0;
+    uint32_t value;
+    LSTATUS result;
+    const wchar_t *state_name;
+
+    if (!valid_environment_scope((uint32_t)scope) || !metadata || !found_out) {
+        return JVMAN_ENV_INVALID_ARGUMENT;
+    }
+    *found_out = 0;
+    jvman_installer_metadata_init(&loaded);
+    status = open_installer_key(
+        scope, KEY_QUERY_VALUE | KEY_ENUMERATE_SUB_KEYS, 0, &root_key);
+    if (status == JVMAN_ENV_NOT_FOUND) {
+        jvman_installer_metadata_free(metadata);
+        return JVMAN_ENV_OK;
+    }
+    if (status != JVMAN_ENV_OK) return status;
+
+    status = query_registry_dword(root_key, JVMAN_VALUE_ACTIVE_STATE, 0,
+                                  &value, &present);
+    if (status != JVMAN_ENV_OK) {
+        RegCloseKey(root_key);
+        return status;
+    }
+    if (present) {
+        if (value > 1u) {
+            RegCloseKey(root_key);
+            return JVMAN_ENV_METADATA_INVALID;
+        }
+        state_name = value == 0u ? JVMAN_INSTALLER_STATE_0
+                                 : JVMAN_INSTALLER_STATE_1;
+        result = RegOpenKeyExW(root_key, state_name, 0, KEY_QUERY_VALUE,
+                               &state_key);
+        if (result != ERROR_SUCCESS) {
+            RegCloseKey(root_key);
+            return result == ERROR_FILE_NOT_FOUND
+                       ? JVMAN_ENV_METADATA_INVALID
+                       : map_registry_status(result);
+        }
+        key = state_key;
+        state_format = 1;
+    } else {
+        status = metadata_legacy_values_present(root_key, &present);
+        if (status != JVMAN_ENV_OK || !present) {
+            RegCloseKey(root_key);
+            if (status == JVMAN_ENV_OK) {
+                jvman_installer_metadata_free(metadata);
+            }
+            return status;
+        }
+        key = root_key;
+    }
+
+    status = metadata_query_string(key, JVMAN_VALUE_VERSION,
+                                   JVMAN_METADATA_TEXT_MAX_CHARS, 1,
+                                   &loaded.version, &present);
+    if (status == JVMAN_ENV_OK) {
+        status = metadata_query_string(key, JVMAN_VALUE_INSTALL_DIR,
+                                       JVMAN_METADATA_TEXT_MAX_CHARS, 1,
+                                       &loaded.install_dir, &present);
+    }
+    if (status == JVMAN_ENV_OK) {
+        status = metadata_query_string(key, JVMAN_VALUE_INSTALL_ID,
+                                       JVMAN_METADATA_TEXT_MAX_CHARS, 1,
+                                       &loaded.install_id, &present);
+    }
+    if (status == JVMAN_ENV_OK) {
+        status = metadata_query_string(key, JVMAN_VALUE_DATA_HOME,
+                                       JVMAN_METADATA_TEXT_MAX_CHARS, 1,
+                                       &loaded.data_home, &present);
+    }
+    if (status == JVMAN_ENV_OK) {
+        status = metadata_query_string(
+            key, JVMAN_VALUE_LANGUAGE, JVMAN_LANGUAGE_TAG_MAX_CHARS + 1u, 0,
+            &loaded.language, &present);
+    }
+
+    if (status == JVMAN_ENV_OK) {
+        status = query_registry_dword(key, JVMAN_VALUE_APP_PATH_OWNED, 1,
+                                      &value, &present);
+        if (status == JVMAN_ENV_OK) {
+            if (value > 1u) status = JVMAN_ENV_METADATA_INVALID;
+            else loaded.app_path_owned = (int)value;
+        }
+    }
+    if (status == JVMAN_ENV_OK) {
+        status = query_registry_dword(key, JVMAN_VALUE_APP_PATH_SCOPE,
+                                      state_format,
+                                      &value, &present);
+        if (status == JVMAN_ENV_OK && present) {
+            if (!valid_environment_scope(value)) status = JVMAN_ENV_METADATA_INVALID;
+            else loaded.app_path_scope = value;
+        }
+    }
+    if (status == JVMAN_ENV_OK) {
+        status = query_registry_dword(key, JVMAN_VALUE_JAVA_PATH_OWNED, 1,
+                                      &value, &present);
+        if (status == JVMAN_ENV_OK) {
+            if (value > 1u) status = JVMAN_ENV_METADATA_INVALID;
+            else loaded.java_path_owned = (int)value;
+        }
+    }
+    if (status == JVMAN_ENV_OK) {
+        status = query_registry_dword(key, JVMAN_VALUE_JAVA_PATH_SCOPE,
+                                      state_format,
+                                      &value, &present);
+        if (status == JVMAN_ENV_OK && present) {
+            if (!valid_environment_scope(value)) status = JVMAN_ENV_METADATA_INVALID;
+            else loaded.java_path_scope = value;
+        }
+    }
+    if (status == JVMAN_ENV_OK) {
+        status = query_registry_dword(key, JVMAN_VALUE_JAVA_HOME_OWNED, 1,
+                                      &value, &present);
+        if (status == JVMAN_ENV_OK) {
+            if (value > 1u) status = JVMAN_ENV_METADATA_INVALID;
+            else loaded.java_home_owned = (int)value;
+        }
+    }
+    if (status == JVMAN_ENV_OK) {
+        status = query_registry_dword(key, JVMAN_VALUE_JAVA_HOME_PRIOR_PRESENT,
+                                      1, &value, &present);
+        if (status == JVMAN_ENV_OK) {
+            if (value > 1u) status = JVMAN_ENV_METADATA_INVALID;
+            else loaded.java_home_prior_present = (int)value;
+        }
+    }
+    if (status == JVMAN_ENV_OK) {
+        status = query_registry_dword(key, JVMAN_VALUE_JAVA_HOME_PRIOR_TYPE,
+                                      1, &value, &present);
+        if (status == JVMAN_ENV_OK) loaded.java_home_prior_type = value;
+    }
+    if (status == JVMAN_ENV_OK) {
+        status = metadata_query_string(
+            key, JVMAN_VALUE_JAVA_HOME_PRIOR_VALUE,
+            JVMAN_ENV_VALUE_MAX_CHARS, 0, &loaded.java_home_prior_value,
+            &present);
+    }
+    if (status == JVMAN_ENV_OK) {
+        status = metadata_query_string(
+            key, JVMAN_VALUE_JAVA_HOME_MANAGED_VALUE,
+            JVMAN_ENV_VALUE_MAX_CHARS, loaded.java_home_owned,
+            &loaded.java_home_managed_value, &present);
+    }
+    if (state_key) RegCloseKey(state_key);
+    RegCloseKey(root_key);
+    if (status != JVMAN_ENV_OK) {
+        jvman_installer_metadata_free(&loaded);
+        return status == JVMAN_ENV_UNSUPPORTED_TYPE
+                   ? JVMAN_ENV_METADATA_INVALID
+                   : status;
+    }
+    if (loaded.java_home_prior_present && !loaded.java_home_prior_value) {
+        jvman_installer_metadata_free(&loaded);
+        return JVMAN_ENV_METADATA_INVALID;
+    }
+    status = metadata_validate(&loaded);
+    if (status != JVMAN_ENV_OK) {
+        jvman_installer_metadata_free(&loaded);
+        return status == JVMAN_ENV_INVALID_ARGUMENT
+                   ? JVMAN_ENV_METADATA_INVALID
+                   : status;
+    }
+    jvman_installer_metadata_free(metadata);
+    *metadata = loaded;
+    *found_out = 1;
+    return JVMAN_ENV_OK;
+}
+
+JvmanEnvironmentStatus jvman_installer_metadata_load(
+    JvmanInstallerMetadata *metadata, int *found_out) {
+    return jvman_installer_metadata_load_scoped(
+        JVMAN_ENV_SCOPE_USER, metadata, found_out);
+}
+
+JvmanEnvironmentStatus jvman_installer_metadata_save_scoped(
+    JvmanEnvironmentScope scope, const JvmanInstallerMetadata *metadata) {
+    HKEY root_key = NULL;
+    HKEY state_key = NULL;
+    JvmanEnvironmentStatus status;
+    uint32_t active_state;
+    uint32_t target_state;
+    int active_present;
+    const wchar_t *state_name;
+    LSTATUS result;
+
+    if (!valid_environment_scope((uint32_t)scope) || !metadata) {
+        return JVMAN_ENV_INVALID_ARGUMENT;
+    }
+    status = metadata_validate(metadata);
+    if (status != JVMAN_ENV_OK) return status;
+    status = open_installer_key(scope, KEY_QUERY_VALUE | KEY_SET_VALUE,
+                                1, &root_key);
+    if (status != JVMAN_ENV_OK) return status;
+
+    status = query_registry_dword(root_key, JVMAN_VALUE_ACTIVE_STATE, 0,
+                                  &active_state, &active_present);
+    if (status != JVMAN_ENV_OK ||
+        (active_present && active_state > 1u)) {
+        RegCloseKey(root_key);
+        return status != JVMAN_ENV_OK ? status : JVMAN_ENV_METADATA_INVALID;
+    }
+    target_state = active_present ? 1u - active_state : 0u;
+    state_name = target_state == 0u ? JVMAN_INSTALLER_STATE_0
+                                    : JVMAN_INSTALLER_STATE_1;
+
+    result = RegCreateKeyExW(root_key, state_name, 0, NULL,
+                             REG_OPTION_NON_VOLATILE,
+                             DELETE | KEY_QUERY_VALUE | KEY_SET_VALUE |
+                                 KEY_ENUMERATE_SUB_KEYS,
+                             NULL,
+                             &state_key, NULL);
+    if (result != ERROR_SUCCESS) {
+        RegCloseKey(root_key);
+        return map_registry_status(result);
+    }
+    result = RegDeleteTreeW(state_key, NULL);
+    if (result != ERROR_SUCCESS && result != ERROR_FILE_NOT_FOUND) {
+        RegCloseKey(state_key);
+        RegCloseKey(root_key);
+        return map_registry_status(result);
+    }
+
+    status = metadata_write_key(state_key, metadata);
+    if (status == JVMAN_ENV_OK) {
+        status = map_registry_status(RegFlushKey(state_key));
+    }
+    if (status != JVMAN_ENV_OK) {
+        RegCloseKey(state_key);
+        RegCloseKey(root_key);
+        return status;
+    }
+
+    status = write_registry_dword(root_key, JVMAN_VALUE_ACTIVE_STATE,
+                                  target_state);
+    if (status != JVMAN_ENV_OK) {
+        RegCloseKey(state_key);
+        RegCloseKey(root_key);
+        return status;
+    }
+    RegCloseKey(state_key);
+
+    /* The commit is already visible; a flush failure cannot roll it back. */
+    (void)RegFlushKey(root_key);
+
+    /* Keep old CLI language discovery working without weakening the commit. */
+    if (metadata->language) {
+        (void)write_registry_string(
+            root_key, JVMAN_VALUE_LANGUAGE, metadata->language, REG_SZ,
+            JVMAN_LANGUAGE_TAG_MAX_CHARS + 1u);
+    } else {
+        (void)delete_registry_value(root_key, JVMAN_VALUE_LANGUAGE);
+    }
+    RegCloseKey(root_key);
+    return JVMAN_ENV_OK;
+}
+
+JvmanEnvironmentStatus jvman_installer_metadata_save(
+    const JvmanInstallerMetadata *metadata) {
+    return jvman_installer_metadata_save_scoped(JVMAN_ENV_SCOPE_USER,
+                                                metadata);
+}
+
+JvmanEnvironmentStatus jvman_installer_metadata_delete_scoped(
+    JvmanEnvironmentScope scope) {
+    HKEY root;
+    LSTATUS result;
+    if (scope == JVMAN_ENV_SCOPE_USER) root = HKEY_CURRENT_USER;
+    else if (scope == JVMAN_ENV_SCOPE_MACHINE) root = HKEY_LOCAL_MACHINE;
+    else return JVMAN_ENV_INVALID_ARGUMENT;
+    result = RegDeleteTreeW(root, JVMAN_INSTALLER_KEY);
     if (result == ERROR_FILE_NOT_FOUND) return JVMAN_ENV_OK;
     return map_registry_status(result);
+}
+
+JvmanEnvironmentStatus jvman_installer_metadata_delete(void) {
+    return jvman_installer_metadata_delete_scoped(JVMAN_ENV_SCOPE_USER);
 }
 
 JvmanEnvironmentStatus jvman_environment_add_path(
@@ -971,12 +1186,13 @@ JvmanEnvironmentStatus jvman_environment_restore_java_home(
     return JVMAN_ENV_OK;
 }
 
-JvmanEnvironmentStatus jvman_arp_write(
-    const wchar_t *version, const wchar_t *install_dir,
-    const wchar_t *uninstall_command) {
+JvmanEnvironmentStatus jvman_arp_write_scoped(
+    JvmanEnvironmentScope scope, const wchar_t *version,
+    const wchar_t *install_dir, const wchar_t *uninstall_command) {
     HKEY key = NULL;
     JvmanEnvironmentStatus status;
-    if (!version || !install_dir || !uninstall_command) {
+    if (!valid_environment_scope((uint32_t)scope) || !version ||
+        !install_dir || !uninstall_command) {
         return JVMAN_ENV_INVALID_ARGUMENT;
     }
     status = validate_string(version, JVMAN_METADATA_TEXT_MAX_CHARS);
@@ -985,7 +1201,7 @@ JvmanEnvironmentStatus jvman_arp_write(
     if (status != JVMAN_ENV_OK) return status;
     status = validate_string(uninstall_command, JVMAN_ENV_VALUE_MAX_CHARS);
     if (status != JVMAN_ENV_OK) return status;
-    status = open_arp_key(KEY_SET_VALUE, &key);
+    status = open_arp_key(scope, KEY_SET_VALUE, &key);
     if (status != JVMAN_ENV_OK) return status;
     status = write_registry_string(key, JVMAN_VALUE_DISPLAY_NAME, L"jvman",
                                    REG_SZ, JVMAN_METADATA_TEXT_MAX_CHARS);
@@ -1019,10 +1235,26 @@ JvmanEnvironmentStatus jvman_arp_write(
     return status;
 }
 
-JvmanEnvironmentStatus jvman_arp_delete(void) {
-    LSTATUS result = RegDeleteTreeW(HKEY_CURRENT_USER, JVMAN_ARP_KEY);
+JvmanEnvironmentStatus jvman_arp_write(
+    const wchar_t *version, const wchar_t *install_dir,
+    const wchar_t *uninstall_command) {
+    return jvman_arp_write_scoped(JVMAN_ENV_SCOPE_USER, version, install_dir,
+                                  uninstall_command);
+}
+
+JvmanEnvironmentStatus jvman_arp_delete_scoped(JvmanEnvironmentScope scope) {
+    HKEY root;
+    LSTATUS result;
+    if (scope == JVMAN_ENV_SCOPE_USER) root = HKEY_CURRENT_USER;
+    else if (scope == JVMAN_ENV_SCOPE_MACHINE) root = HKEY_LOCAL_MACHINE;
+    else return JVMAN_ENV_INVALID_ARGUMENT;
+    result = RegDeleteTreeW(root, JVMAN_ARP_KEY);
     if (result == ERROR_FILE_NOT_FOUND) return JVMAN_ENV_OK;
     return map_registry_status(result);
+}
+
+JvmanEnvironmentStatus jvman_arp_delete(void) {
+    return jvman_arp_delete_scoped(JVMAN_ENV_SCOPE_USER);
 }
 
 JvmanEnvironmentStatus jvman_environment_broadcast_change(void) {
@@ -1037,27 +1269,55 @@ JvmanEnvironmentStatus jvman_environment_broadcast_change(void) {
 
 #else /* !_WIN32: the installer backend is intentionally Windows-only. */
 
+JvmanEnvironmentStatus jvman_installer_metadata_load_scoped(
+    JvmanEnvironmentScope scope, JvmanInstallerMetadata *metadata,
+    int *found_out) {
+    if (!valid_environment_scope((uint32_t)scope) || !metadata || !found_out) {
+        return JVMAN_ENV_INVALID_ARGUMENT;
+    }
+    *found_out = 0;
+    return JVMAN_ENV_UNSUPPORTED;
+}
+
 JvmanEnvironmentStatus jvman_installer_metadata_load(
     JvmanInstallerMetadata *metadata, int *found_out) {
-    if (!metadata || !found_out) return JVMAN_ENV_INVALID_ARGUMENT;
-    *found_out = 0;
+    return jvman_installer_metadata_load_scoped(
+        JVMAN_ENV_SCOPE_USER, metadata, found_out);
+}
+
+JvmanEnvironmentStatus jvman_installer_metadata_save_scoped(
+    JvmanEnvironmentScope scope, const JvmanInstallerMetadata *metadata) {
+    if (!valid_environment_scope((uint32_t)scope) || !metadata) {
+        return JVMAN_ENV_INVALID_ARGUMENT;
+    }
     return JVMAN_ENV_UNSUPPORTED;
 }
 
 JvmanEnvironmentStatus jvman_installer_metadata_save(
     const JvmanInstallerMetadata *metadata) {
-    return metadata ? JVMAN_ENV_UNSUPPORTED : JVMAN_ENV_INVALID_ARGUMENT;
+    return jvman_installer_metadata_save_scoped(JVMAN_ENV_SCOPE_USER,
+                                                metadata);
+}
+
+JvmanEnvironmentStatus jvman_installer_metadata_delete_scoped(
+    JvmanEnvironmentScope scope) {
+    if (!valid_environment_scope((uint32_t)scope)) {
+        return JVMAN_ENV_INVALID_ARGUMENT;
+    }
+    return JVMAN_ENV_UNSUPPORTED;
 }
 
 JvmanEnvironmentStatus jvman_installer_metadata_delete(void) {
-    return JVMAN_ENV_UNSUPPORTED;
+    return jvman_installer_metadata_delete_scoped(JVMAN_ENV_SCOPE_USER);
 }
 
 JvmanEnvironmentStatus jvman_environment_add_path(
     JvmanEnvironmentScope scope, const wchar_t *directory, int prior_owned,
     int *owned_out, int *changed_out) {
-    if (!directory || !owned_out || !changed_out) return JVMAN_ENV_INVALID_ARGUMENT;
-    (void)scope;
+    if (!valid_environment_scope((uint32_t)scope) || !directory ||
+        !owned_out || !changed_out) {
+        return JVMAN_ENV_INVALID_ARGUMENT;
+    }
     *owned_out = prior_owned;
     *changed_out = 0;
     return JVMAN_ENV_UNSUPPORTED;
@@ -1066,8 +1326,10 @@ JvmanEnvironmentStatus jvman_environment_add_path(
 JvmanEnvironmentStatus jvman_environment_remove_path(
     JvmanEnvironmentScope scope, const wchar_t *directory, int owned,
     int *changed_out) {
-    if (!directory || !changed_out) return JVMAN_ENV_INVALID_ARGUMENT;
-    (void)scope;
+    if (!valid_environment_scope((uint32_t)scope) || !directory ||
+        !changed_out) {
+        return JVMAN_ENV_INVALID_ARGUMENT;
+    }
     *changed_out = 0;
     (void)owned;
     return JVMAN_ENV_UNSUPPORTED;
@@ -1089,17 +1351,32 @@ JvmanEnvironmentStatus jvman_environment_restore_java_home(
     return JVMAN_ENV_UNSUPPORTED;
 }
 
+JvmanEnvironmentStatus jvman_arp_write_scoped(
+    JvmanEnvironmentScope scope, const wchar_t *version,
+    const wchar_t *install_dir, const wchar_t *uninstall_command) {
+    if (!valid_environment_scope((uint32_t)scope) || !version ||
+        !install_dir || !uninstall_command) {
+        return JVMAN_ENV_INVALID_ARGUMENT;
+    }
+    return JVMAN_ENV_UNSUPPORTED;
+}
+
 JvmanEnvironmentStatus jvman_arp_write(
     const wchar_t *version, const wchar_t *install_dir,
     const wchar_t *uninstall_command) {
-    if (!version || !install_dir || !uninstall_command) {
+    return jvman_arp_write_scoped(JVMAN_ENV_SCOPE_USER, version, install_dir,
+                                  uninstall_command);
+}
+
+JvmanEnvironmentStatus jvman_arp_delete_scoped(JvmanEnvironmentScope scope) {
+    if (!valid_environment_scope((uint32_t)scope)) {
         return JVMAN_ENV_INVALID_ARGUMENT;
     }
     return JVMAN_ENV_UNSUPPORTED;
 }
 
 JvmanEnvironmentStatus jvman_arp_delete(void) {
-    return JVMAN_ENV_UNSUPPORTED;
+    return jvman_arp_delete_scoped(JVMAN_ENV_SCOPE_USER);
 }
 
 JvmanEnvironmentStatus jvman_environment_broadcast_change(void) {

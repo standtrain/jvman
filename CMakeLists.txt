@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(jvman VERSION 0.2.0 LANGUAGES C)
+project(jvman VERSION 0.2.1 LANGUAGES C)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -13,6 +13,7 @@ add_executable(jvman
     src/update.c
     src/platform.c
     src/util.c
+    src/i18n.c
     src/sha256.c
 )
 target_include_directories(jvman PRIVATE src resources)
@@ -114,7 +115,7 @@ if(BUILD_TESTING)
     )
     target_include_directories(test_unit PRIVATE src)
     if(MSVC)
-        target_compile_options(test_unit PRIVATE /W4)
+        target_compile_options(test_unit PRIVATE /W4 /utf-8)
     else()
         target_compile_options(test_unit PRIVATE -Wall -Wextra -Wpedantic)
     endif()
@@ -131,11 +132,12 @@ if(BUILD_TESTING)
         src/update.c
         src/platform.c
         src/util.c
+        src/i18n.c
         src/sha256.c
     )
     target_include_directories(test_update PRIVATE src)
     if(MSVC)
-        target_compile_options(test_update PRIVATE /W4)
+        target_compile_options(test_update PRIVATE /W4 /utf-8)
     else()
         target_compile_options(test_update PRIVATE -Wall -Wextra -Wpedantic)
     endif()
@@ -152,13 +154,21 @@ if(BUILD_TESTING)
         tests/test_update_flow.c
         src/update.c
         src/util.c
+        src/i18n.c
     )
     target_include_directories(test_update_flow PRIVATE src)
     if(MSVC)
-        target_compile_options(test_update_flow PRIVATE /W4)
+        target_compile_options(test_update_flow PRIVATE /W4 /utf-8)
     else()
         target_compile_options(test_update_flow PRIVATE
             -Wall -Wextra -Wpedantic)
+    endif()
+    if(WIN32)
+        target_compile_definitions(test_update_flow PRIVATE _WIN32_WINNT=0x0601)
+        target_link_libraries(test_update_flow PRIVATE advapi32)
+    else()
+        target_compile_definitions(test_update_flow PRIVATE
+            _POSIX_C_SOURCE=200809L _XOPEN_SOURCE=700)
     endif()
     add_test(NAME update_flow COMMAND test_update_flow)
 

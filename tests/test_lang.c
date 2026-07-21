@@ -15,6 +15,7 @@ static int failures = 0;
 static void test_language_table(JvmanInstallerLang language) {
     int id;
     CHECK(jvman_lang_set(language) == 0);
+    CHECK(jvman_lang_current() == language);
     for (id = 0; id < JVMAN_STR_COUNT; ++id) {
         const wchar_t *value = jvman_lang_str((JvmanStringId)id);
         CHECK(value != NULL);
@@ -70,16 +71,18 @@ int main(void) {
     CHECK(wcscmp(jvman_lang_str(JVMAN_STR_APP_TITLE), L"jvman Setup") == 0);
     CHECK(wcsstr(jvman_lang_str(JVMAN_STR_UNINSTALL_CONFIRM_FINAL),
                  L"final confirmation") != NULL);
+    CHECK(wcsstr(jvman_lang_str(JVMAN_STR_USAGE), L"Options:") != NULL);
     CHECK(jvman_lang_set(JVMAN_LANG_ZH_CN) == 0);
     CHECK(wcscmp(jvman_lang_str(JVMAN_STR_LANG_SYSTEM), L"跟随系统") == 0);
+    CHECK(wcscmp(jvman_lang_str(JVMAN_STR_APP_TITLE), L"jvman 安装程序") == 0);
     CHECK(wcsstr(jvman_lang_str(JVMAN_STR_UNINSTALL_CONFIRM_FINAL),
                  L"再次确认") != NULL);
+    CHECK(wcsstr(jvman_lang_str(JVMAN_STR_USAGE), L"选项：") != NULL);
     CHECK(jvman_lang_str((JvmanStringId)-1)[0] == L'\0');
     CHECK(jvman_lang_str(JVMAN_STR_COUNT)[0] == L'\0');
     jvman_lang_use_system_default();
-    CHECK(wcscmp(jvman_lang_str(JVMAN_STR_APP_TITLE), L"jvman Setup") == 0 ||
-          wcscmp(jvman_lang_str(JVMAN_STR_APP_TITLE),
-                 L"jvman 安装程序") == 0);
+    CHECK(jvman_lang_current() == JVMAN_LANG_EN ||
+          jvman_lang_current() == JVMAN_LANG_ZH_CN);
 
     if (failures != 0) {
         fprintf(stderr, "%d language test(s) failed\n", failures);

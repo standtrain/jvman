@@ -6,17 +6,17 @@
 JDKs and existing local JDK installations with one native executable and no
 linked third-party runtime libraries.
 
-This documentation describes jvman `0.2.0`.
+This documentation describes jvman `0.2.1`.
 
 The first release targets Windows while keeping the core portable to Linux and
 macOS. On Windows, switching uses an NTFS directory junction, so it normally
 does not require administrator privileges or Developer Mode.
 
 After building, place `jvman.exe` in a user-writable directory on `PATH`, or
-run it as `.\jvman.exe`. The `jvman` CLI does not edit the registry, the system
-`PATH`, or shell profile files automatically. On Windows, the optional
-`jvman-setup.exe` bundle below can configure the current-user or system `PATH`
-after an explicit choice.
+run it as `.\jvman.exe`. The `jvman` CLI does not edit the system `PATH` or
+shell profile files automatically. On Windows, only `jvman language` writes a
+current-user preference under `HKCU\Software\jvman\Preferences`. The optional
+`jvman-setup.exe` bundle below configures PATH after an explicit choice.
 
 ## Features
 
@@ -67,20 +67,25 @@ with CMake it is `<build>\jvman-setup.exe`.
 ## Windows Installer
 
 `jvman-setup.exe` is a native Win32 installer. By default it installs for the
-current user and does not request administrator privileges; choosing the system
-`PATH` requires running the installer as administrator. The default locations
-are:
+current user and does not request administrator privileges. Choosing the
+all-users option starts a machine installation through Windows UAC; the
+manifest remains `asInvoker`, so current-user and portable installs do not
+request elevation. The default locations are:
 
-| Item | Default |
-| --- | --- |
-| Program files | `%LOCALAPPDATA%\Programs\jvman` |
-| jvman data | `%LOCALAPPDATA%\jvman` (or a valid `JVMAN_HOME`) |
-| Registry state | `HKCU\Software\jvman\Installer` |
+| Item | Current user | All users |
+| --- | --- | --- |
+| Program files | `%LOCALAPPDATA%\Programs\jvman` | `%ProgramFiles%\jvman` |
+| Runtime data | `%LOCALAPPDATA%\jvman` (or `JVMAN_HOME`) | Per invoking user |
+| Installer state | `HKCU\Software\jvman\Installer` | `HKLM\Software\jvman\Installer` |
 
 Interactive runs begin with a language dropdown populated from the installer's
 built-in language table. `System default` is selected initially and resolves
 from the Windows UI language; English and Simplified Chinese remain available
-as explicit overrides. Canceling the language dialog exits setup.
+as explicit overrides. Canceling the language dialog exits setup. After a
+successful install, the accepted language is stored with the installation and
+synchronized to the invoking Windows user's CLI preference. `JVMAN_LANG`
+still overrides the current process, and `jvman language` can change the saved
+preference afterward.
 
 When started without switches, the installer asks whether to enable `PATH`
 integration, whether it should apply to only the current user or all users,
@@ -88,30 +93,37 @@ whether a valid `current` JDK should provide `JAVA_HOME`, and whether to run
 `jvman discover --register`. Current-user PATH integration adds both the
 program directory and the stable `<data-home>\current\bin` directory. The
 stable Java entry is added even before a JDK is selected; later `jvman use`
-commands redirect `current` without another PATH update. System PATH
-integration adds only the program directory. Existing entries are retained and
-exact or canonical duplicates are not added.
+commands redirect `current` without another PATH update. All-users installs
+add only the protected program directory to the machine PATH. Existing entries
+are retained and exact or canonical duplicates are not added.
 
 The normal command-line switches are:
 
 ```text
-jvman-setup.exe /S [/DIR=<absolute-directory>] [/USER_PATH|/SYSTEM_PATH] [/NO_PATH]
+jvman-setup.exe /S [/LANG=en|zh-CN] [/DIR=<absolute-directory>] [/USER_PATH|/SYSTEM_PATH] [/NO_PATH]
 jvman-setup.exe /CONFIGURE_JAVA [/REPLACE_JAVA_HOME]
 jvman-setup.exe /DISCOVER
 jvman-setup.exe /PORTABLE /DIR=<absolute-directory>
 jvman-setup.exe /UNINSTALL [/S] [/REMOVE_DATA [/REMOVE_JDKS]]
+jvman-setup.exe /UNINSTALL /MACHINE [/S]
 jvman-setup.exe /HELP
 ```
 
-`/S`, `/SILENT`, and `/QUIET` suppress dialogs. `/ADD_TO_PATH` explicitly
-enables PATH integration. `/USER_PATH` adds the program directory and stable
+`/S`, `/SILENT`, and `/QUIET` suppress dialogs. `/LANG=en` and
+`/LANG=zh-CN` select the installer and resulting CLI language without opening
+the dropdown. `/ADD_TO_PATH` explicitly enables PATH integration. `/USER_PATH` adds the program directory and stable
 `<data-home>\current\bin` to the current-user environment and is the default.
-`/SYSTEM_PATH` (also `/MACHINE_PATH` or `/ALL_USERS_PATH`) adds only the program
-directory to the machine environment and requires administrator permission; it
-never adds the user-writable JDK directory. `/NO_PATH` (or
-`/NO_ADD_TO_PATH`) disables PATH updates and removes installer-owned program
-and stable Java PATH entries on upgrade. `/CONFIGURE_JAVA` is opt-in,
-configures current-user `JAVA_HOME`, and requires
+`/SYSTEM_PATH` (also `/MACHINE_PATH` or
+`/ALL_USERS_PATH`) installs the executable in protected Program Files, records
+state in HKLM, adds that directory to the machine PATH, and requests elevation
+only when needed. Machine mode never adds a user-writable JDK directory to the
+system PATH. `/NO_PATH` (or `/NO_ADD_TO_PATH`) disables PATH updates and
+removes installer-owned program and stable Java PATH entries on upgrade.
+When upgrading an older current-user install that owned a machine PATH entry,
+setup elevates only a narrow cleanup helper and then updates the original
+user's metadata without running the user install under an administrator
+profile.
+`/CONFIGURE_JAVA` is opt-in, configures current-user `JAVA_HOME`, and requires
 `<data-home>\current\bin\java.exe` and `javac.exe`; without
 `/REPLACE_JAVA_HOME`, a different existing `JAVA_HOME` is treated as a conflict
 and is left unchanged. `/DISCOVER` runs discovery only after installation and
@@ -139,10 +151,11 @@ non-silent run presents the same choices in the graphical prompts.
 `/PORTABLE /DIR=...` extracts only `jvman.exe` to the explicitly supplied
 directory. It does not create `JVMAN_HOME`, write the registry, or modify
 `PATH`/`JAVA_HOME`, and is suitable for a USB or per-project copy. The regular
-uninstaller is available from Add/Remove Programs, `/UNINSTALL`, or
-`jvman uninstall` from the installed CLI. Interactive uninstall first selects
-a removal scope and then shows a final destructive-
-action confirmation; `/S` is reserved for unattended use.
+uninstaller is available through `jvman uninstall`, Add/Remove Programs, or
+`/UNINSTALL`; machine installations use `/UNINSTALL /MACHINE` and request UAC
+symmetrically. Interactive uninstall first selects a removal scope and then
+shows a final destructive-action confirmation; `/S` is reserved for unattended
+use.
 
 There are three scopes. By default, uninstall removes only the program and
 environment entries owned by this installation. `/REMOVE_DATA` also deletes
@@ -152,6 +165,11 @@ managed by jvman; `/REMOVE_JDKS` is invalid on its own. Cleanup never follows a
 junction or symbolic link, and JDKs registered from external paths are never
 deleted. Silent data removal is destructive and should be used only after the
 caller has explicitly confirmed the selected scope.
+
+Data-removal scopes apply only to current-user installations. A machine
+uninstall always removes only the shared program, HKLM state, and machine PATH
+entry; `/MACHINE` cannot be combined with `/REMOVE_DATA` or `/REMOVE_JDKS`
+because each user's CLI data is resolved independently.
 
 ## Quick Start
 
@@ -210,18 +228,24 @@ jvman list
 jvman current
 jvman which [name]
 jvman remove <name>
-jvman uninstall [<name>]
+jvman uninstall
 jvman exec <name> [--] <command> [args...]
 jvman init [powershell|cmd|sh]
 jvman doctor
 jvman update [--check] [--version <version>]
+jvman language [--list|en|zh-CN]
 jvman home
 ```
 
-Aliases: `ls` for `list`, `default` for `use`, and `uninstall <name>` for
-`remove <name>`. On Windows, `jvman uninstall` without a name validates the
-Installer metadata and install marker for the running copy, then starts that
-installation's uninstaller. Portable or unregistered copies are rejected.
+Aliases: `ls` for `list` and `default` for `use`. For compatibility,
+`jvman uninstall <name>` remains an alias for `jvman remove <name>`; without a
+name, `jvman uninstall` starts the registered Windows uninstaller.
+
+`jvman language` prints the active interface language. On Windows,
+`jvman language en` and `jvman language zh-CN` persist a current-user override;
+`JVMAN_LANG=en` or `JVMAN_LANG=zh-CN` overrides both installer metadata and the
+saved preference for one process. Other platforms support the environment
+variable and `--list`, but do not write a persistent preference.
 
 `jvman source` prints the active mode. The built-in sources are `tsinghua`
 (TUNA Adoptium mirror), `huawei` (BiSheng), `aliyun` (Dragonwell), `adoptium`,
@@ -380,7 +404,7 @@ No source code is copied from those projects.
 
 ## Current Scope
 
-Version `0.2.0` automatically selects between built-in global, Tsinghua, Huawei,
+Version `0.2.1` automatically selects between built-in global, Tsinghua, Huawei,
 Aliyun, and custom catalogs and accepts a Java major version for remote installs.
 Local discovery recognizes
 common JDK vendors, but multi-vendor JDK selection, managed JREs, EA builds, semantic

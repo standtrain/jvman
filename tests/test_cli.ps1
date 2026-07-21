@@ -18,8 +18,85 @@ $oldProgramFilesX86 = [Environment]::GetEnvironmentVariable('ProgramFiles(x86)',
 $oldLocalAppData = $env:LOCALAPPDATA
 $oldUserProfile = $env:USERPROFILE
 $oldDiscoveryJavaBin = $env:JVMAN_TEST_JAVA_BIN
-$installerRegistryPath = 'Registry::HKEY_CURRENT_USER\Software\jvman\Installer'
-$installerKeyExisted = Test-Path -LiteralPath $installerRegistryPath
+$oldLanguage = $env:JVMAN_LANG
+$registryView = [Microsoft.Win32.RegistryView]::Default
+$currentUserRegistry = [Microsoft.Win32.RegistryKey]::OpenBaseKey(
+    [Microsoft.Win32.RegistryHive]::CurrentUser, $registryView)
+$preferencesRegistryPath = 'Software\jvman\Preferences'
+$installerRegistryPath = 'Software\jvman\Installer'
+$languageRegistryName = 'Language'
+$zhBanner = -join ([char[]]@(
+    0x8f7b, 0x91cf, 0x7ea7, 0x20, 0x4a, 0x61, 0x76, 0x61, 0x20,
+    0x7248, 0x672c, 0x7ba1, 0x7406, 0x5668
+))
+$zhUsageLabel = -join ([char[]]@(0x4f7f, 0x7528, 0x65b9, 0x6cd5))
+$zhErrorUsageLabel = -join ([char[]]@(0x7528, 0x6cd5))
+$zhLanguageLabel = -join ([char[]]@(0x8bed, 0x8a00))
+$zhSimplifiedChinese = -join ([char[]]@(0x7b80, 0x4f53, 0x4e2d, 0x6587))
+$zhName = -join ([char[]]@(0x540d, 0x79f0))
+$zhTemplate = -join ([char[]]@(0x6a21, 0x677f))
+$zhCustomSource = -join ([char[]]@(
+    0x81ea, 0x5b9a, 0x4e49, 0x4e0b, 0x8f7d, 0x6e90
+))
+$zhCustomLabel = (-join ([char[]]@(0x81ea, 0x5b9a, 0x4e49))) +
+    [char]0xff1a
+$zhSourceLimit = $zhCustomSource + (-join ([char[]]@(
+    0x6570, 0x91cf, 0x5df2, 0x8fbe, 0x4e0a, 0x9650
+)))
+$zhUrlRequirement = -join ([char[]]@(
+    0x5fc5, 0x987b, 0x4f7f, 0x7528
+))
+$zhSupportedPlaceholders = -join ([char[]]@(
+    0x652f, 0x6301, 0x7684, 0x5360, 0x4f4d, 0x7b26
+))
+$zhRegistered = -join ([char[]]@(0x5df2, 0x6ce8, 0x518c))
+$zhUninstallHelp = "  jvman uninstall [<$zhName>]"
+$zhSourceUsage = $zhErrorUsageLabel + [char]0xff1a +
+    "jvman source [--list|--reset|<$zhName>|add <$zhName> " +
+    "<HTTPS$zhTemplate>|remove <$zhName>]"
+$consoleCodePageProbe = @'
+using System.Runtime.InteropServices;
+public static class JvmanConsoleCodePageProbe {
+    [DllImport("kernel32.dll")]
+    public static extern uint GetConsoleOutputCP();
+
+    [DllImport("kernel32.dll")]
+    public static extern bool SetConsoleOutputCP(uint codePage);
+}
+'@
+Add-Type -TypeDefinition $consoleCodePageProbe
+$preferencesKey = $currentUserRegistry.OpenSubKey($preferencesRegistryPath, $false)
+$preferencesKeyExisted = $null -ne $preferencesKey
+$hadPreferenceLanguage = $false
+$oldPreferenceLanguage = $null
+$oldPreferenceLanguageKind = $null
+if ($preferencesKey) {
+    $hadPreferenceLanguage = $preferencesKey.GetValueNames() -contains $languageRegistryName
+    if ($hadPreferenceLanguage) {
+        $oldPreferenceLanguage = $preferencesKey.GetValue(
+            $languageRegistryName, $null,
+            [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+        $oldPreferenceLanguageKind = $preferencesKey.GetValueKind($languageRegistryName)
+    }
+    $preferencesKey.Dispose()
+}
+$installerKey = $currentUserRegistry.OpenSubKey($installerRegistryPath, $false)
+$installerKeyExisted = $null -ne $installerKey
+$installerValueNames = ''
+$installerHadLanguage = $false
+$installerLanguage = $null
+$installerLanguageKind = $null
+if ($installerKey) {
+    $installerValueNames = (@($installerKey.GetValueNames()) | Sort-Object) -join "`0"
+    $installerHadLanguage = $installerKey.GetValueNames() -contains $languageRegistryName
+    if ($installerHadLanguage) {
+        $installerLanguage = $installerKey.GetValue(
+            $languageRegistryName, $null,
+            [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames).ToString()
+        $installerLanguageKind = $installerKey.GetValueKind($languageRegistryName)
+    }
+    $installerKey.Dispose()
+}
 $duplicateJunction = $null
 try {
     $bufferSize = $Host.UI.RawUI.BufferSize
@@ -50,21 +127,49 @@ function Invoke-JvmanExpectFailure {
     if ($exitCode -eq 0) { throw "jvman $($Arguments -join ' ') unexpectedly succeeded" }
 }
 
-function Invoke-NativeCapture {
-    param(
-        [string]$Path,
-        [Parameter(ValueFromRemainingArguments = $true)][string[]]$Arguments
-    )
+function Invoke-JvmanFailureOutput {
+    param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Arguments)
     $previousErrorActionPreference = $ErrorActionPreference
     try {
         $ErrorActionPreference = 'Continue'
-        $output = @(& $Path @Arguments 2>&1)
+        $output = @(& $binaryPath @Arguments 2>&1)
         $exitCode = $LASTEXITCODE
     }
     finally {
         $ErrorActionPreference = $previousErrorActionPreference
     }
-    return [pscustomobject]@{ Output = $output; ExitCode = $exitCode }
+    if ($exitCode -eq 0) {
+        throw "jvman $($Arguments -join ' ') unexpectedly succeeded"
+    }
+    return $output
+}
+
+function Assert-JvmanRestoresConsoleOutputCodePage {
+    param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Arguments)
+    $originalCodePage = [JvmanConsoleCodePageProbe]::GetConsoleOutputCP()
+    if ($originalCodePage -eq 0) { return }
+    $probeCodePage = if ($originalCodePage -eq 437) { 850 } else { 437 }
+    if (-not [JvmanConsoleCodePageProbe]::SetConsoleOutputCP($probeCodePage)) {
+        throw "cannot set console output code page probe to $probeCodePage"
+    }
+    try {
+        $ErrorActionPreference = 'Continue'
+        & $binaryPath @Arguments *> $null
+        $exitCode = $LASTEXITCODE
+        $ErrorActionPreference = 'Stop'
+        if ($exitCode -ne 0) {
+            throw "jvman $($Arguments -join ' ') failed during code page probe"
+        }
+        $restoredCodePage = [JvmanConsoleCodePageProbe]::GetConsoleOutputCP()
+        if ($restoredCodePage -ne $probeCodePage) {
+            throw "jvman left console output code page $restoredCodePage; expected $probeCodePage"
+        }
+    }
+    finally {
+        $ErrorActionPreference = 'Stop'
+        [JvmanConsoleCodePageProbe]::SetConsoleOutputCP($originalCodePage) |
+            Out-Null
+    }
 }
 
 function New-FakeJdk {
@@ -106,17 +211,48 @@ function Get-RegistrationContent([string]$Name) {
 }
 
 try {
+    $env:JVMAN_LANG = 'zh-CN'
+    $chineseHelp = (Invoke-Jvman) -join "`n"
+    $hasChineseBanner = $chineseHelp -match [regex]::Escape($zhBanner)
+    $hasChineseUsage = $chineseHelp -match [regex]::Escape($zhUsageLabel)
+    $hasChineseUninstall = $chineseHelp -match
+        [regex]::Escape($zhUninstallHelp)
+    if (-not $hasChineseBanner -or -not $hasChineseUsage -or
+        -not $hasChineseUninstall) {
+        throw "JVMAN_LANG=zh-CN did not localize help " +
+            "(banner=$hasChineseBanner, usage=$hasChineseUsage, " +
+            "uninstall=$hasChineseUninstall):`n$chineseHelp"
+    }
+    $languageList = (Invoke-Jvman language --list) -join "`n"
+    if ($languageList -notmatch [regex]::Escape($zhLanguageLabel) -or
+        $languageList -notmatch [regex]::Escape($zhSimplifiedChinese)) {
+        throw "language list was not localized:`n$languageList"
+    }
+    # Prime Windows PowerShell's native-output decoder before changing the
+    # console code page used by the restoration probe.
+    Assert-JvmanRestoresConsoleOutputCodePage version
+
+    $env:JVMAN_LANG = 'en'
+    $englishHelp = (Invoke-Jvman) -join "`n"
+    if ($englishHelp -notmatch 'lightweight Java version manager' -or
+        $englishHelp -notmatch '(?m)^Usage:$' -or
+        $englishHelp -notmatch '(?m)^  jvman uninstall \[<name>\]$' -or
+        $englishHelp -match [regex]::Escape($zhUsageLabel)) {
+        throw "JVMAN_LANG=en did not force English help:`n$englishHelp"
+    }
     $uninstallProbeDir = Join-Path $testRoot 'uninstall command probe'
     $uninstallProbe = Join-Path $uninstallProbeDir 'jvman.exe'
     New-Item -ItemType Directory -Force -Path $uninstallProbeDir | Out-Null
     Copy-Item -LiteralPath $binaryPath -Destination $uninstallProbe
-    $uninstallProbeResult = Invoke-NativeCapture $uninstallProbe uninstall
-    if ($uninstallProbeResult.ExitCode -eq 0 -or
-        ($uninstallProbeResult.Output -join "`n") -notmatch
+    $ErrorActionPreference = 'Continue'
+    $uninstallProbeOutput = & $uninstallProbe uninstall 2>&1
+    $uninstallProbeExit = $LASTEXITCODE
+    $ErrorActionPreference = 'Stop'
+    if ($uninstallProbeExit -eq 0 -or
+        ($uninstallProbeOutput -join "`n") -notmatch
             'cannot start jvman uninstaller') {
         throw 'an unregistered executable copy reached the self-uninstall path'
     }
-
     if (-not $installerKeyExisted) {
         $registeredProbeDir = Join-Path $testRoot 'registered uninstall probe'
         $registeredProbeData = Join-Path $testRoot 'registered uninstall data'
@@ -124,57 +260,112 @@ try {
         $registeredUninstaller = Join-Path $registeredProbeDir 'uninstall.exe'
         $registeredMarker = Join-Path $registeredProbeDir 'install.marker'
         $registeredId = 'cli-test-' + [Guid]::NewGuid().ToString('N')
-        $probeStatePath = "$installerRegistryPath\State0"
         New-Item -ItemType Directory -Force -Path $registeredProbeDir | Out-Null
-        New-Item -ItemType Directory -Force -Path $registeredProbeData | Out-Null
         Copy-Item -LiteralPath $binaryPath -Destination $registeredProbe
         Copy-Item -LiteralPath $binaryPath -Destination $registeredUninstaller
         [IO.File]::WriteAllBytes(
             $registeredMarker,
             [Text.Encoding]::Unicode.GetBytes($registeredId))
-        New-Item -Path $installerRegistryPath -Force | Out-Null
+        $probeInstallerKey = $currentUserRegistry.CreateSubKey(
+            $installerRegistryPath, $true)
         try {
-            New-ItemProperty -Path $installerRegistryPath -Name Version `
-                -Value '0.2.0' -PropertyType String -Force | Out-Null
-            New-ItemProperty -Path $installerRegistryPath -Name InstallDir `
-                -Value $registeredProbeDir -PropertyType String -Force | Out-Null
-            New-ItemProperty -Path $installerRegistryPath -Name DataHome `
-                -Value $registeredProbeData -PropertyType String -Force | Out-Null
-            New-ItemProperty -Path $installerRegistryPath -Name InstallId `
-                -Value $registeredId -PropertyType String -Force | Out-Null
-            $legacyResult = Invoke-NativeCapture $registeredProbe uninstall
-            if ($legacyResult.ExitCode -ne 0) {
-                throw 'legacy metadata without ARP did not launch the uninstaller'
+            $probeStateKey = $probeInstallerKey.CreateSubKey('State0', $true)
+            try {
+                $probeStateKey.SetValue(
+                    'Version', '0.2.1',
+                    [Microsoft.Win32.RegistryValueKind]::String)
+                $probeStateKey.SetValue(
+                    'InstallDir', $registeredProbeDir,
+                    [Microsoft.Win32.RegistryValueKind]::String)
+                $probeStateKey.SetValue(
+                    'DataHome', $registeredProbeData,
+                    [Microsoft.Win32.RegistryValueKind]::String)
+                $probeStateKey.SetValue(
+                    'InstallId', $registeredId,
+                    [Microsoft.Win32.RegistryValueKind]::String)
             }
-
-            New-Item -Path $probeStatePath -Force | Out-Null
-            New-ItemProperty -Path $probeStatePath -Name Version `
-                -Value '0.2.0' -PropertyType String -Force | Out-Null
-            New-ItemProperty -Path $probeStatePath -Name InstallDir `
-                -Value $registeredProbeDir -PropertyType String -Force | Out-Null
-            New-ItemProperty -Path $probeStatePath -Name DataHome `
-                -Value $registeredProbeData -PropertyType String -Force | Out-Null
-            New-ItemProperty -Path $probeStatePath -Name InstallId `
-                -Value $registeredId -PropertyType String -Force | Out-Null
-            New-ItemProperty -Path $installerRegistryPath -Name ActiveState `
-                -Value 0 -PropertyType DWord -Force | Out-Null
-            $atomicResult = Invoke-NativeCapture $registeredProbe uninstall
-            if ($atomicResult.ExitCode -ne 0) {
-                throw 'atomic metadata without ARP did not launch the uninstaller'
+            finally {
+                $probeStateKey.Dispose()
             }
-
+            $probeInstallerKey.SetValue(
+                'ActiveState', 0,
+                [Microsoft.Win32.RegistryValueKind]::DWord)
+        }
+        finally {
+            $probeInstallerKey.Dispose()
+        }
+        try {
+            $ErrorActionPreference = 'Continue'
+            & $registeredProbe uninstall *> $null
+            $registeredExit = $LASTEXITCODE
+            $ErrorActionPreference = 'Stop'
+            if ($registeredExit -ne 0) {
+                throw 'registered metadata without ARP did not launch the uninstaller'
+            }
             [IO.File]::WriteAllBytes(
                 $registeredMarker,
                 [Text.Encoding]::Unicode.GetBytes('different-install-id'))
-            $mismatchedResult = Invoke-NativeCapture $registeredProbe uninstall
-            if ($mismatchedResult.ExitCode -eq 0) {
+            $ErrorActionPreference = 'Continue'
+            & $registeredProbe uninstall *> $null
+            $mismatchedMarkerExit = $LASTEXITCODE
+            $ErrorActionPreference = 'Stop'
+            if ($mismatchedMarkerExit -eq 0) {
                 throw 'jvman uninstall accepted a marker that did not match metadata'
             }
         }
         finally {
-            Remove-Item -LiteralPath $installerRegistryPath -Recurse -Force
+            $currentUserRegistry.DeleteSubKeyTree($installerRegistryPath, $false)
         }
     }
+    Assert-JvmanRestoresConsoleOutputCodePage language zh-CN
+    $writtenPreferencesKey = $currentUserRegistry.OpenSubKey(
+        $preferencesRegistryPath, $false)
+    if (-not $writtenPreferencesKey -or
+        $writtenPreferencesKey.GetValueKind($languageRegistryName) -ne
+            [Microsoft.Win32.RegistryValueKind]::String -or
+        $writtenPreferencesKey.GetValue($languageRegistryName) -ne 'zh-CN') {
+        throw 'language command did not persist an exact REG_SZ zh-CN preference'
+    }
+    $writtenPreferencesKey.Dispose()
+    Remove-Item Env:JVMAN_LANG -ErrorAction SilentlyContinue
+    $persistedChineseHelp = (Invoke-Jvman) -join "`n"
+    if ($persistedChineseHelp -notmatch [regex]::Escape($zhUsageLabel)) {
+        throw "the persisted zh-CN language was not loaded:`n$persistedChineseHelp"
+    }
+    Invoke-Jvman language en | Out-Null
+    $persistedEnglishHelp = (Invoke-Jvman) -join "`n"
+    if ($persistedEnglishHelp -notmatch '(?m)^Usage:$' -or
+        $persistedEnglishHelp -match [regex]::Escape($zhUsageLabel)) {
+        throw "the persisted English language was not loaded:`n$persistedEnglishHelp"
+    }
+
+    $installerKeyAfter = $currentUserRegistry.OpenSubKey($installerRegistryPath, $false)
+    if (($null -ne $installerKeyAfter) -ne $installerKeyExisted) {
+        throw 'language command created or removed the Installer metadata key'
+    }
+    if ($installerKeyAfter) {
+        $installerValueNamesAfter = (@($installerKeyAfter.GetValueNames()) |
+            Sort-Object) -join "`0"
+        $installerHadLanguageAfter = $installerKeyAfter.GetValueNames() -contains
+            $languageRegistryName
+        if ($installerValueNamesAfter -ne $installerValueNames -or
+            $installerHadLanguageAfter -ne $installerHadLanguage) {
+            throw 'language command changed the Installer metadata values'
+        }
+        if ($installerHadLanguage) {
+            $installerLanguageAfter = $installerKeyAfter.GetValue(
+                $languageRegistryName, $null,
+                [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames).ToString()
+            $installerLanguageKindAfter = $installerKeyAfter.GetValueKind(
+                $languageRegistryName)
+            if ($installerLanguageAfter -ne $installerLanguage -or
+                $installerLanguageKindAfter -ne $installerLanguageKind) {
+                throw 'language command altered the Installer Language metadata'
+            }
+        }
+        $installerKeyAfter.Dispose()
+    }
+    $env:JVMAN_LANG = 'en'
 
     $userHome = Join-Path $testRoot 'user home'
     $localAppData = Join-Path $testRoot 'local app data'
@@ -221,6 +412,25 @@ try {
         'ProgramFiles(x86)', (Join-Path $testRoot 'program files x86'), 'Process')
     $env:LOCALAPPDATA = $localAppData
     $env:USERPROFILE = $userHome
+
+    $env:JVMAN_LANG = 'zh-CN'
+    try {
+        $sourceUsageError = (Invoke-JvmanFailureOutput source --list extra) -join "`n"
+        if ($sourceUsageError -notmatch [regex]::Escape($zhSourceUsage)) {
+            throw "source usage error was not localized:`n$sourceUsageError"
+        }
+        $sourceUrlError = (Invoke-JvmanFailureOutput source add invalid-url `
+            'http://example.test/{major}') -join "`n"
+        if ($sourceUrlError -notmatch [regex]::Escape($zhCustomSource) -or
+            $sourceUrlError -notmatch [regex]::Escape($zhUrlRequirement) -or
+            $sourceUrlError -notmatch [regex]::Escape($zhSupportedPlaceholders) -or
+            $sourceUrlError -notmatch [regex]::Escape('{archive}')) {
+            throw "custom source URL error was not localized:`n$sourceUrlError"
+        }
+    }
+    finally {
+        $env:JVMAN_LANG = 'en'
+    }
 
     $preview = @(Invoke-Jvman discover)
     $previewText = $preview -join "`n"
@@ -331,6 +541,18 @@ try {
     if ($customList -notmatch '(?m)^  company\s+Custom: company') {
         throw 'custom download source was not listed'
     }
+    $env:JVMAN_LANG = 'zh-CN'
+    try {
+        $localizedCustomList = (Invoke-Jvman source --list) -join "`n"
+        $localizedCustomPattern = '(?m)^  company\s+' +
+            [regex]::Escape($zhCustomLabel + 'company') + '$'
+        if ($localizedCustomList -notmatch $localizedCustomPattern) {
+            throw "custom download source label was not localized:`n$localizedCustomList"
+        }
+    }
+    finally {
+        $env:JVMAN_LANG = 'en'
+    }
     Invoke-Jvman source company | Out-Null
     if ((Invoke-Jvman source).Trim() -ne 'company') {
         throw 'custom download source could not be selected'
@@ -355,7 +577,17 @@ try {
             ("url=https://limit{0}.example.test/{{major}}" -f $_)
         )
     }
-    Invoke-JvmanExpectFailure source add overflow 'https://overflow.example.test/{major}'
+    $env:JVMAN_LANG = 'zh-CN'
+    try {
+        $sourceLimitError = (Invoke-JvmanFailureOutput source add overflow `
+            'https://overflow.example.test/{major}') -join "`n"
+        if ($sourceLimitError -notmatch [regex]::Escape($zhSourceLimit)) {
+            throw "custom source limit error was not localized:`n$sourceLimitError"
+        }
+    }
+    finally {
+        $env:JVMAN_LANG = 'en'
+    }
     if (Test-Path -LiteralPath (Join-Path $stateRoot 'sources\overflow.conf')) {
         throw 'custom source limit failure still created a configuration'
     }
@@ -376,6 +608,17 @@ try {
     if ($registeredRowsA.Count -ne 1 -or
         $registeredRowsA[0] -notmatch 'registered:manual-discovered') {
         throw 'discover did not match an existing registration by canonical home'
+    }
+    $env:JVMAN_LANG = 'zh-CN'
+    try {
+        $localizedRegisteredPreview = (Invoke-Jvman discover) -join "`n"
+        if ($localizedRegisteredPreview -notmatch
+            [regex]::Escape("${zhRegistered}:manual-discovered")) {
+            throw "registered discovery status was not localized:`n$localizedRegisteredPreview"
+        }
+    }
+    finally {
+        $env:JVMAN_LANG = 'en'
     }
 
     Invoke-Jvman discover --register | Out-Null
@@ -620,6 +863,22 @@ try {
     Write-Host 'All CLI integration tests passed.'
 }
 finally {
+    $restorePreferencesKey = $currentUserRegistry.CreateSubKey(
+        $preferencesRegistryPath, $true)
+    if ($hadPreferenceLanguage) {
+        $restorePreferencesKey.SetValue(
+            $languageRegistryName, $oldPreferenceLanguage,
+            $oldPreferenceLanguageKind)
+    } else {
+        $restorePreferencesKey.DeleteValue($languageRegistryName, $false)
+    }
+    $removePreferencesKey = -not $preferencesKeyExisted -and
+        $restorePreferencesKey.GetValueNames().Count -eq 0 -and
+        $restorePreferencesKey.GetSubKeyNames().Count -eq 0
+    $restorePreferencesKey.Dispose()
+    if ($removePreferencesKey) {
+        $currentUserRegistry.DeleteSubKey($preferencesRegistryPath, $false)
+    }
     if ($duplicateJunction -and (Test-Path -LiteralPath $duplicateJunction)) {
         [System.IO.Directory]::Delete($duplicateJunction, $false)
     }
@@ -643,4 +902,10 @@ finally {
     $env:LOCALAPPDATA = $oldLocalAppData
     $env:USERPROFILE = $oldUserProfile
     $env:JVMAN_TEST_JAVA_BIN = $oldDiscoveryJavaBin
+    if ($null -eq $oldLanguage) {
+        Remove-Item Env:JVMAN_LANG -ErrorAction SilentlyContinue
+    } else {
+        $env:JVMAN_LANG = $oldLanguage
+    }
+    $currentUserRegistry.Dispose()
 }

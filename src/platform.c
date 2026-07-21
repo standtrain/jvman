@@ -28,12 +28,15 @@
 #include <wctype.h>
 
 #define JVMAN_WINDOWS_INSTALLER_KEY L"Software\\jvman\\Installer"
+#define JVMAN_WINDOWS_ARP_KEY \
+    L"Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\jvman"
 #define JVMAN_WINDOWS_INSTALLER_STATE_0 L"State0"
 #define JVMAN_WINDOWS_INSTALLER_STATE_1 L"State1"
 #define JVMAN_WINDOWS_ACTIVE_STATE L"ActiveState"
 #define JVMAN_WINDOWS_INSTALL_DIR L"InstallDir"
 #define JVMAN_WINDOWS_INSTALL_ID L"InstallId"
 #define JVMAN_WINDOWS_DATA_HOME L"DataHome"
+#define JVMAN_WINDOWS_INSTALL_LOCATION L"InstallLocation"
 #define JVMAN_WINDOWS_INSTALL_MARKER L"install.marker"
 #define JVMAN_WINDOWS_UNINSTALLER L"uninstall.exe"
 #define JVMAN_WINDOWS_INSTALL_ID_CHARS 128u

@@ -76,6 +76,12 @@ JvmanInstallStatus jvman_install_paths_init(
  * %LOCALAPPDATA%\jvman when JVMAN_HOME is absent/invalid. */
 JvmanInstallStatus jvman_install_paths_default(JvmanInstallPaths *paths);
 
+/* Uses the Windows known folders Program Files\jvman and
+ * ProgramData\jvman.  Machine-wide defaults never depend on environment
+ * variables, the current directory, or executable search paths. */
+JvmanInstallStatus jvman_install_paths_machine_default(
+    JvmanInstallPaths *paths);
+
 /* Securely create missing components of the program tree.  The data tree is
  * intentionally left untouched until jvman itself needs it. */
 JvmanInstallStatus jvman_install_paths_create(
@@ -107,6 +113,16 @@ JvmanInstallStatus jvman_install_marker_read(
     wchar_t *installation_id,
     size_t installation_id_capacity);
 
+/* Snapshot the three authenticated program files before an upgrade. Restore
+ * keeps the snapshots when any copy fails so a later retry remains possible;
+ * discard removes them only after the metadata commit succeeds. */
+JvmanInstallStatus jvman_install_backup_create(
+    const JvmanInstallPaths *paths);
+JvmanInstallStatus jvman_install_backup_restore(
+    const JvmanInstallPaths *paths);
+JvmanInstallStatus jvman_install_backup_discard(
+    const JvmanInstallPaths *paths);
+
 /* Delete the authenticated data tree without following reparse points.
  * When remove_managed_jdks is zero, the exact top-level jdks directory is
  * preserved and every other data entry is removed. External registered JDK
@@ -114,6 +130,11 @@ JvmanInstallStatus jvman_install_marker_read(
 JvmanInstallStatus jvman_install_remove_data(
     const JvmanInstallPaths *paths,
     int remove_managed_jdks);
+
+/* Remove only the installed jvman.exe payload.  The marker and uninstaller
+ * remain available so a caller can finish or retry authenticated cleanup. */
+JvmanInstallStatus jvman_install_remove_payload(
+    const JvmanInstallPaths *paths);
 
 /* Remove only the install whitelist.  No recursive deletion is performed.
  * SELF_CLEANUP_REQUIRED means the running module is paths->uninstall_path;

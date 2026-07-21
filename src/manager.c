@@ -2,6 +2,7 @@
 
 #include "download_source.h"
 #include "discovery.h"
+#include "i18n.h"
 #include "platform.h"
 #include "sha256.h"
 #include "update.h"
@@ -13,6 +14,9 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* Direct stdout formats below are application-owned literals, never input. */
+#define printf(...) jvman_i18n_printf(__VA_ARGS__)
+
 #define JVMAN_METADATA_LIMIT (1024u * 1024u)
 #define JVMAN_DOWNLOAD_PROBE_SIZE (64u * 1024u)
 #define JVMAN_DOWNLOAD_PROBE_TIMEOUT 15u
@@ -20,24 +24,39 @@
 #define JVMAN_DOWNLOAD_SOURCE_LIMIT 64u
 #define JVMAN_CUSTOM_SOURCE_LIMIT 32u
 #define JVMAN_SOURCE_TEMPLATE_MAX 2048u
+#define JVMAN_SOURCE_LABEL_MAX (JVMAN_NAME_MAX + 32u)
 
 typedef struct DownloadSourceRegistry {
     const JvmanDownloadSource *items[JVMAN_DOWNLOAD_SOURCE_LIMIT];
     JvmanDownloadSource custom[JVMAN_CUSTOM_SOURCE_LIMIT];
     char names[JVMAN_CUSTOM_SOURCE_LIMIT][JVMAN_NAME_MAX + 1];
-    char labels[JVMAN_CUSTOM_SOURCE_LIMIT][JVMAN_NAME_MAX + 16];
     char templates[JVMAN_CUSTOM_SOURCE_LIMIT][JVMAN_SOURCE_TEMPLATE_MAX];
     size_t count;
     size_t custom_count;
 } DownloadSourceRegistry;
 
+static const char *download_source_display_label(
+    const JvmanDownloadSource *source, char *buffer, size_t buffer_size) {
+    int written;
+    if (!source || !source->label) return "";
+    if (source->kind != JVMAN_DOWNLOAD_SOURCE_CUSTOM_ADOPTIUM) {
+        return jvman_i18n_text(source->label);
+    }
+    if (!buffer || buffer_size == 0 || !source->name) return "";
+    written = snprintf(buffer, buffer_size,
+                       jvman_i18n_text(source->label), source->name);
+    if (written < 0 || (size_t)written >= buffer_size) return source->name;
+    return buffer;
+}
+
 static int print_error(const char *message) {
-    fprintf(stderr, "jvman: %s\n", message);
+    jvman_i18n_fprintf(stderr, "jvman: %s\n", jvman_i18n_text(message));
     return 1;
 }
 
 static int print_platform_error(const char *message) {
-    fprintf(stderr, "jvman: %s: %s\n", message, platform_last_error());
+    jvman_i18n_fprintf(stderr, "jvman: %s: %s\n",
+                       jvman_i18n_text(message), platform_last_error());
     return 1;
 }
 
@@ -214,16 +233,21 @@ static int switch_to_registration(const JvmanContext *context,
         if (had_previous) {
             snprintf(state, sizeof(state), "%s\n", previous);
             if (platform_write_text_atomic(context->current_state, state) != 0) {
-                fprintf(stderr, "jvman: cannot switch current JDK: %s; state rollback also failed\n",
-                        switch_error);
+                jvman_i18n_fprintf(
+                    stderr,
+                    "jvman: cannot switch current JDK: %s; state rollback also failed\n",
+                    switch_error);
                 return 1;
             }
         } else if (platform_remove_file(context->current_state) != 0) {
-            fprintf(stderr, "jvman: cannot switch current JDK: %s; state rollback also failed\n",
-                    switch_error);
+            jvman_i18n_fprintf(
+                stderr,
+                "jvman: cannot switch current JDK: %s; state rollback also failed\n",
+                switch_error);
             return 1;
         }
-        fprintf(stderr, "jvman: cannot switch current JDK: %s\n", switch_error);
+        jvman_i18n_fprintf(stderr, "jvman: cannot switch current JDK: %s\n",
+                           switch_error);
         return 1;
     }
     return 0;
@@ -303,7 +327,8 @@ static int command_list(const JvmanContext *context) {
         return print_platform_error("cannot list registrations");
     }
     qsort(entries, count, sizeof(*entries), name_compare);
-    printf("  %-20s %-9s %s\n", "VERSION", "SOURCE", "JAVA_HOME");
+    printf("  %-20s %-9s %s\n", jvman_i18n_text("VERSION"),
+           jvman_i18n_text("SOURCE"), "JAVA_HOME");
     for (i = 0; i < count; ++i) {
         JvmanRegistration registration;
         size_t length;
@@ -315,9 +340,10 @@ static int command_list(const JvmanContext *context) {
         printf("%c %-20s %-9s %s%s\n",
                jvman_name_equal(active, registration.name) ? '*' : ' ',
                registration.name,
-               registration.managed ? "managed" : "external",
+               jvman_i18n_text(registration.managed ? "managed" : "external"),
                registration.home,
-               platform_is_directory(registration.home) ? "" : " [missing]");
+               platform_is_directory(registration.home)
+                   ? "" : jvman_i18n_text(" [missing]"));
         ++shown;
     }
     platform_free_directory_list(entries, count);
@@ -523,24 +549,39 @@ static void print_discovery_results(const JvmanDiscoveryList *discovered,
     size_t registered_count = 0;
     size_t jre_count = 0;
     size_t invalid_count = 0;
-    puts("TYPE    VERSION          VENDOR         NAME                     STATUS                   SOURCES                  JAVA_HOME");
+    jvman_i18n_puts("TYPE    VERSION          VENDOR         NAME                     STATUS                   SOURCES                  JAVA_HOME");
     for (i = 0; i < discovered->count; ++i) {
         const JvmanDiscoveryCandidate *candidate = &discovered->items[i];
+        const char *status = views[i].status[0] ? views[i].status : "invalid";
+        char localized_status[JVMAN_NAME_MAX + 32];
         char sources[160];
+        if (strncmp(status, "registered:", 11) == 0) {
+            int written = snprintf(localized_status, sizeof(localized_status),
+                                   "%s:%s", jvman_i18n_text("registered"),
+                                   status + 11);
+            if (written >= 0 && written < (int)sizeof(localized_status)) {
+                status = localized_status;
+            }
+        } else {
+            status = jvman_i18n_text(status);
+        }
         jvman_discovery_format_sources(candidate->sources, sources, sizeof(sources));
         printf("%-7s %-16s %-14s %-24s %-24s %-24s %s\n",
                jvman_discovery_type_name(candidate->type),
                candidate->version[0] ? candidate->version : "-",
-               candidate->vendor[0] ? candidate->vendor : "unknown",
+               candidate->vendor[0] ? candidate->vendor
+                                    : jvman_i18n_text("unknown"),
                views[i].name[0] ? views[i].name : "-",
-               views[i].status[0] ? views[i].status : "invalid",
+               status,
                sources[0] ? sources : "-", candidate->home);
         if (strcmp(views[i].status, "new") == 0) ++new_count;
         else if (strncmp(views[i].status, "registered:", 11) == 0) ++registered_count;
         else if (strcmp(views[i].status, "jre") == 0) ++jre_count;
         else ++invalid_count;
     }
-    if (discovered->count == 0) puts("(no Java installations discovered)");
+    if (discovered->count == 0) {
+        jvman_i18n_puts("(no Java installations discovered)");
+    }
     printf("Summary: %lu new, %lu registered, %lu JRE, %lu invalid\n",
            (unsigned long)new_count, (unsigned long)registered_count,
            (unsigned long)jre_count, (unsigned long)invalid_count);
@@ -627,8 +668,10 @@ static int command_discover(const JvmanContext *context, int register_found) {
             snprintf(views[i].name, sizeof(views[i].name), "%s",
                      candidate->suggested_name[0] ? candidate->suggested_name : "-");
             strcpy(views[i].status, "invalid");
-            fprintf(stderr, "jvman: discovered JDK disappeared or became invalid: %s\n",
-                    candidate->home);
+            jvman_i18n_fprintf(
+                stderr,
+                "jvman: discovered JDK disappeared or became invalid: %s\n",
+                candidate->home);
             continue;
         }
         fresh.sources = candidate->sources;
@@ -669,7 +712,8 @@ static int command_discover(const JvmanContext *context, int register_found) {
         ++added;
     }
     print_discovery_results(&discovered, views);
-    printf("Registered %lu new JDK%s.\n", (unsigned long)added, added == 1 ? "" : "s");
+    printf("Registered %lu new JDK%s.\n", (unsigned long)added,
+           jvman_i18n_plural_suffix((unsigned long)added));
     result = write_failed ? 1 : 0;
 
 done:
@@ -755,7 +799,9 @@ static int command_remove(const JvmanContext *context, const char *name) {
         print_platform_error("cannot remove registration");
         goto done;
     }
-    printf("Removed %s%s\n", name, registration.managed ? " and its managed files" : " registration");
+    printf("Removed %s%s\n", name,
+           jvman_i18n_text(registration.managed
+                               ? " and its managed files" : " registration"));
     result = 0;
 done:
     platform_lock_release(&lock);
@@ -766,7 +812,7 @@ int jvman_uninstall_run_cli(void) {
     if (platform_launch_jvman_uninstaller() != 0) {
         return print_platform_error("cannot start jvman uninstaller");
     }
-    puts("The jvman uninstaller was started.");
+    jvman_i18n_puts("The jvman uninstaller was started.");
     return 0;
 }
 
@@ -856,7 +902,8 @@ static int command_doctor(const JvmanContext *context) {
         printf("[ok]   JAVA_HOME points to the stable current path\n");
     } else {
         printf("[warn] JAVA_HOME is %s; expected %s\n",
-               java_home && *java_home ? java_home : "not set", context->current_link);
+               java_home && *java_home ? java_home : jvman_i18n_text("not set"),
+               context->current_link);
         ++warnings;
     }
     if (jvman_path_join3(expected_java, sizeof(expected_java), context->current_link,
@@ -887,10 +934,11 @@ static int command_doctor(const JvmanContext *context) {
 #endif
     if (warnings) {
         printf("%d warning%s found. Evaluate `jvman init` in your shell after selecting a JDK.\n",
-               warnings, warnings == 1 ? "" : "s");
+               warnings,
+               jvman_i18n_plural_suffix((unsigned long)warnings));
         return 1;
     }
-    puts("No problems found.");
+    jvman_i18n_puts("No problems found.");
     return 0;
 }
 
@@ -1066,14 +1114,9 @@ static int download_source_registry_load(const JvmanContext *context,
         }
         free(text);
         strcpy(registry->names[index], name);
-        if (snprintf(registry->labels[index], sizeof(registry->labels[index]),
-                     "Custom: %s", name) >=
-            (int)sizeof(registry->labels[index])) {
-            goto invalid;
-        }
         source = &registry->custom[index];
         source->name = registry->names[index];
-        source->label = registry->labels[index];
+        source->label = "Custom: %s";
         source->kind = JVMAN_DOWNLOAD_SOURCE_CUSTOM_ADOPTIUM;
         source->distribution = NULL;
         source->metadata_template = registry->templates[index];
@@ -1150,6 +1193,7 @@ static int command_source(const JvmanContext *context, int argc, char **argv) {
     size_t i;
     int result = 1;
     if (argc == 3 && strcmp(argv[2], "--reset") == 0) {
+        char label[JVMAN_SOURCE_LABEL_MAX];
         selected = jvman_download_source_default();
         if (acquire_lock(context, &lock) != 0) {
             return print_platform_error("cannot lock state");
@@ -1159,7 +1203,8 @@ static int command_source(const JvmanContext *context, int argc, char **argv) {
             print_platform_error("cannot reset download source");
             goto done;
         }
-        printf("Download source: %s (%s)\n", selected->name, selected->label);
+        printf("Download source: %s (%s)\n", selected->name,
+               download_source_display_label(selected, label, sizeof(label)));
         result = 0;
         goto done;
     }
@@ -1247,9 +1292,11 @@ static int command_source(const JvmanContext *context, int argc, char **argv) {
             return print_error("download source configuration is invalid");
         }
         for (i = 0; i < registry.count; ++i) {
+            char label[JVMAN_SOURCE_LABEL_MAX];
             const JvmanDownloadSource *item = registry.items[i];
             printf("%c %-12s %s\n", item == active ? '*' : ' ',
-                   item->name, item->label);
+                   item->name,
+                   download_source_display_label(item, label, sizeof(label)));
         }
         return 0;
     }
@@ -1269,7 +1316,11 @@ static int command_source(const JvmanContext *context, int argc, char **argv) {
             goto done;
         }
     }
-    printf("Download source: %s (%s)\n", selected->name, selected->label);
+    {
+        char label[JVMAN_SOURCE_LABEL_MAX];
+        printf("Download source: %s (%s)\n", selected->name,
+               download_source_display_label(selected, label, sizeof(label)));
+    }
     result = 0;
 done:
     platform_lock_release(&lock);
@@ -1371,7 +1422,7 @@ static int resolve_fastest_download_source(
         version_size == 0) {
         return -1;
     }
-    puts("Testing download sources...");
+    jvman_i18n_puts("Testing download sources...");
     fflush(stdout);
     if (registry->count > JVMAN_DOWNLOAD_SOURCE_LIMIT) return -1;
     for (i = 0; i < registry->count; ++i) {
@@ -1410,10 +1461,11 @@ static int resolve_fastest_download_source(
         if (resolved != 0) {
             const char *reason = platform_last_error();
             if (strcmp(reason, "unknown platform error") == 0) {
-                reason = "invalid metadata";
+                reason = jvman_i18n_text("invalid metadata");
             }
             printf("  %-10s %" PRIu64 " ms, unavailable (%s)\n",
-                   source->name, elapsed, reason);
+                   source->name, elapsed,
+                   reason);
             fflush(stdout);
             continue;
         }
@@ -1573,9 +1625,11 @@ static int command_install(const JvmanContext *context, const char *version,
                 checksum, sizeof(checksum), exact_version,
                 sizeof(exact_version));
         } else {
+            char label[JVMAN_SOURCE_LABEL_MAX];
             printf("Resolving Temurin %d for %s/%s via %s...\n", major,
                    platform_os_name(), platform_arch_name(),
-                   download_source->label);
+                   download_source_display_label(download_source, label,
+                                                 sizeof(label)));
             fflush(stdout);
             resolve_result = download_metadata(
                 download_source, major, metadata, url, sizeof(url), checksum,
@@ -1612,9 +1666,9 @@ static int command_install(const JvmanContext *context, const char *version,
             print_error("archive does not match the SHA-256 pinned on the command line");
             goto cleanup;
         }
-        puts("Archive checksum verified.");
+        jvman_i18n_puts("Archive checksum verified.");
     }
-    puts("Extracting JDK...");
+    jvman_i18n_puts("Extracting JDK...");
     if (extract_archive(archive_source, stage) != 0) {
         print_error("archive extraction failed");
         goto cleanup;
@@ -1670,25 +1724,56 @@ cleanup:
 }
 
 static void print_usage(void) {
-    puts("jvman " JVMAN_VERSION " - lightweight Java version manager");
+    jvman_i18n_puts("jvman " JVMAN_VERSION " - lightweight Java version manager");
     puts("");
-    puts("Usage:");
-    puts("  jvman install <major> [--name <name>] [--sha256 <hex>] [--source <name>]");
-    puts("  jvman install <name> --archive <file> [--sha256 <hex>]");
-    puts("  jvman add <name> <jdk-home>");
-    puts("  jvman use <name>");
-    puts("  jvman list");
-    puts("  jvman discover [--register]");
-    puts("  jvman source [--list|--reset|<name>|add <name> <HTTPS-template>|remove <name>]");
-    puts("  jvman current");
-    puts("  jvman which [name]");
-    puts("  jvman remove <name>");
-    puts("  jvman uninstall [<name>]");
-    puts("  jvman exec <name> [--] <command> [args...]");
-    puts("  jvman init [powershell|cmd|sh]");
-    puts("  jvman doctor");
-    puts("  jvman update [--check] [--version <version>]");
-    puts("  jvman home");
+    jvman_i18n_puts("Usage:");
+    jvman_i18n_puts("  jvman install <major> [--name <name>] [--sha256 <hex>] [--source <name>]");
+    jvman_i18n_puts("  jvman install <name> --archive <file> [--sha256 <hex>]");
+    jvman_i18n_puts("  jvman add <name> <jdk-home>");
+    jvman_i18n_puts("  jvman use <name>");
+    jvman_i18n_puts("  jvman list");
+    jvman_i18n_puts("  jvman discover [--register]");
+    jvman_i18n_puts("  jvman source [--list|--reset|<name>|add <name> <HTTPS-template>|remove <name>]");
+    jvman_i18n_puts("  jvman current");
+    jvman_i18n_puts("  jvman which [name]");
+    jvman_i18n_puts("  jvman remove <name>");
+    jvman_i18n_puts("  jvman uninstall [<name>]");
+    jvman_i18n_puts("  jvman exec <name> [--] <command> [args...]");
+    jvman_i18n_puts("  jvman init [powershell|cmd|sh]");
+    jvman_i18n_puts("  jvman doctor");
+    jvman_i18n_puts("  jvman update [--check] [--version <version>]");
+    jvman_i18n_puts("  jvman language [--list|en|zh-CN]");
+    jvman_i18n_puts("  jvman home");
+}
+
+static int command_language(int argc, char **argv) {
+    JvmanLanguage selected;
+    int stored;
+    if (argc == 2) {
+        puts(jvman_i18n_language_tag());
+        return 0;
+    }
+    if (argc != 3) {
+        return print_error("usage: jvman language [--list|en|zh-CN]");
+    }
+    if (strcmp(argv[2], "--list") == 0) {
+        jvman_i18n_puts("Languages:");
+        printf("  %-7s %s\n", "en", jvman_i18n_text("English"));
+        printf("  %-7s %s\n", "zh-CN",
+               jvman_i18n_text("Simplified Chinese"));
+        return 0;
+    }
+    if (jvman_i18n_parse_language(argv[2], &selected) != 0) {
+        return print_error("unknown language; use `jvman language --list`");
+    }
+    stored = jvman_i18n_set_persistent(selected);
+    if (stored == -2) {
+        return print_error(
+            "Persistent language selection is only supported on Windows; set JVMAN_LANG instead");
+    }
+    if (stored != 0) return print_error("cannot save language preference");
+    printf("Language set to %s.\n", jvman_i18n_language_tag());
+    return 0;
 }
 
 static int parse_install(const JvmanContext *context, int argc, char **argv) {
@@ -1724,6 +1809,8 @@ int jvman_run(JvmanContext *context, int argc, char **argv) {
         puts(JVMAN_VERSION); return 0;
     }
     if (strcmp(command, "home") == 0) { puts(context->root); return 0; }
+    if (strcmp(command, "language") == 0)
+        return command_language(argc, argv);
     if (strcmp(command, "install") == 0) return parse_install(context, argc, argv);
     if (strcmp(command, "source") == 0) return command_source(context, argc, argv);
     if (strcmp(command, "add") == 0)

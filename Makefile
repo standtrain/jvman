@@ -16,14 +16,14 @@ RESOURCE_OBJ :=
 endif
 
 TARGET := jvman$(EXEEXT)
-SOURCES := src/main.c src/manager.c src/download_source.c src/discovery.c src/update.c src/platform.c src/util.c src/sha256.c
-HEADERS := src/common.h src/manager.h src/download_source.h src/discovery.h src/update.h src/platform.h src/util.h src/sha256.h
+SOURCES := src/main.c src/manager.c src/download_source.c src/discovery.c src/update.c src/platform.c src/util.c src/i18n.c src/sha256.c
+HEADERS := src/common.h src/manager.h src/download_source.h src/discovery.h src/update.h src/platform.h src/util.h src/i18n.h src/sha256.h
 TEST_TARGET := test_unit$(EXEEXT)
 TEST_SOURCES := tests/test_unit.c src/download_source.c src/discovery.c src/platform.c src/util.c src/sha256.c
 UPDATE_TEST_TARGET := test_update$(EXEEXT)
-UPDATE_TEST_SOURCES := tests/test_update.c src/update.c src/platform.c src/util.c src/sha256.c
+UPDATE_TEST_SOURCES := tests/test_update.c src/update.c src/platform.c src/util.c src/i18n.c src/sha256.c
 UPDATE_FLOW_TEST_TARGET := test_update_flow$(EXEEXT)
-UPDATE_FLOW_TEST_SOURCES := tests/test_update_flow.c src/update.c src/util.c
+UPDATE_FLOW_TEST_SOURCES := tests/test_update_flow.c src/update.c src/util.c src/i18n.c
 UPDATE_HELPER_TEST_TARGET := test_update_helper$(EXEEXT)
 
 # The native setup bundle is intentionally a Windows-only target.  It consists
@@ -86,14 +86,14 @@ $(TEST_TARGET): $(TEST_SOURCES) src/common.h src/download_source.h src/util.h sr
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(TEST_SOURCES) $(LDFLAGS) $(LDLIBS) -o $@
 
 $(UPDATE_TEST_TARGET): $(UPDATE_TEST_SOURCES) src/common.h src/update.h \
-		src/platform.h src/util.h src/sha256.h
+		src/platform.h src/util.h src/i18n.h src/sha256.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(UPDATE_TEST_SOURCES) \
 		$(LDFLAGS) $(LDLIBS) -o $@
 
 $(UPDATE_FLOW_TEST_TARGET): $(UPDATE_FLOW_TEST_SOURCES) src/common.h \
-		src/update.h src/platform.h src/util.h
+		src/update.h src/platform.h src/util.h src/i18n.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(UPDATE_FLOW_TEST_SOURCES) \
-		$(LDFLAGS) -o $@
+		$(LDFLAGS) $(LDLIBS) -o $@
 
 $(UPDATE_HELPER_TEST_TARGET): tests/test_update_helper.c src/platform.c \
 		src/util.c src/sha256.c src/common.h src/platform.h src/util.h \

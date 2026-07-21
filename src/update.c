@@ -1,6 +1,7 @@
 #include "update.h"
 
 #include "common.h"
+#include "i18n.h"
 #include "platform.h"
 #include "sha256.h"
 #include "util.h"
@@ -28,12 +29,13 @@ typedef struct JvmanJsonCursor {
 } JvmanJsonCursor;
 
 static int update_error(const char *message) {
-    fprintf(stderr, "jvman: %s\n", message);
+    jvman_i18n_fprintf(stderr, "jvman: %s\n", jvman_i18n_text(message));
     return 1;
 }
 
 static int update_platform_error(const char *message) {
-    fprintf(stderr, "jvman: %s: %s\n", message, platform_last_error());
+    jvman_i18n_fprintf(stderr, "jvman: %s: %s\n",
+                       jvman_i18n_text(message), platform_last_error());
     return 1;
 }
 
@@ -531,12 +533,13 @@ int jvman_update_command(int check_only, const char *requested_version) {
         return update_error("cannot compare update versions");
     }
     if (comparison < 0) {
-        fprintf(stderr, "jvman: refusing to downgrade from %s to %s\n",
-                JVMAN_VERSION, version);
+        jvman_i18n_fprintf(
+            stderr, "jvman: refusing to downgrade from %s to %s\n",
+            JVMAN_VERSION, version);
         return 1;
     }
     if (comparison == 0) {
-        printf("jvman %s is already up to date.\n", JVMAN_VERSION);
+        jvman_i18n_printf("jvman %s is already up to date.\n", JVMAN_VERSION);
         return 0;
     }
     if (jvman_update_build_release_url(version, "SHA256SUMS", checksums_url,
@@ -556,13 +559,14 @@ int jvman_update_command(int check_only, const char *requested_version) {
     }
     free(checksums);
     if (check_only) {
-        printf("Update available: %s -> %s\n", JVMAN_VERSION, version);
+        jvman_i18n_printf("Update available: %s -> %s\n", JVMAN_VERSION,
+                          version);
         return 0;
     }
     if (platform_create_temporary_file(download, sizeof(download)) != 0) {
         return update_platform_error("cannot create an update download file");
     }
-    printf("Downloading jvman %s...\n", version);
+    jvman_i18n_printf("Downloading jvman %s...\n", version);
     if (platform_https_download(asset_url, download, JVMAN_UPDATE_BINARY_LIMIT, 1) != 0) {
         update_platform_error("cannot download the release binary");
         goto done;
@@ -613,10 +617,12 @@ int jvman_update_command(int check_only, const char *requested_version) {
     }
     staged[0] = '\0';
     if (deferred) {
-        printf("Update to jvman %s is scheduled and will finish after this process exits.\n",
-               version);
+        jvman_i18n_printf(
+            "Update to jvman %s is scheduled and will finish after this process exits.\n",
+            version);
     } else {
-        printf("Updated jvman %s -> %s.\n", JVMAN_VERSION, version);
+        jvman_i18n_printf("Updated jvman %s -> %s.\n", JVMAN_VERSION,
+                          version);
     }
     result = 0;
 done:

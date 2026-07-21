@@ -11,6 +11,8 @@
 #include "../src/sha256.h"
 
 #include <windows.h>
+#include <ntsecapi.h>
+#include <shlobj.h>
 
 #include <stddef.h>
 #include <stdint.h>
@@ -29,6 +31,17 @@
 #define JVMAN_DATA_DELETE_BUFFER_SIZE (64u * 1024u)
 #define JVMAN_DATA_DELETE_DEPTH_LIMIT 128u
 #define JVMAN_DATA_DELETE_ENTRY_LIMIT 1000000u
+
+/* Keep the stable Known Folder identifiers local so MinGW builds do not need
+ * an additional UUID import library solely for these two constants. */
+static const KNOWNFOLDERID JVMAN_FOLDERID_PROGRAM_FILES = {
+    0x905e63b6, 0xc1bf, 0x494e,
+    {0xb2, 0x9c, 0x65, 0xb7, 0x32, 0xd3, 0xd2, 0x1a}
+};
+static const KNOWNFOLDERID JVMAN_FOLDERID_PROGRAM_DATA = {
+    0x62ab5d82, 0xfdc1, 0x4dc3,
+    {0xa9, 0xdd, 0x07, 0x0d, 0x1d, 0x49, 0x5d, 0x97}
+};
 
 static size_t bounded_wcslen(const wchar_t *value, size_t limit) {
     size_t length = 0;
@@ -374,6 +387,64 @@ JvmanInstallStatus jvman_install_paths_default(JvmanInstallPaths *paths) {
     return jvman_install_paths_init(paths, install_dir, data_home);
 }
 
+static JvmanInstallStatus get_known_folder_path(
+    REFKNOWNFOLDERID folder_id,
+    wchar_t output[],
+    size_t output_capacity) {
+    PWSTR known_path = NULL;
+    HRESULT result;
+    JvmanInstallStatus status = JVMAN_INSTALL_OK;
+    size_t length;
+    if (!folder_id || !output || output_capacity == 0) {
+        return JVMAN_INSTALL_INVALID_ARGUMENT;
+    }
+    output[0] = L'\0';
+    result = SHGetKnownFolderPath(folder_id, KF_FLAG_DEFAULT, NULL,
+                                  &known_path);
+    if (FAILED(result)) {
+        if (result == E_OUTOFMEMORY) return JVMAN_INSTALL_NO_MEMORY;
+        return JVMAN_INSTALL_PATH_NOT_FOUND;
+    }
+    if (!known_path) return JVMAN_INSTALL_PATH_NOT_FOUND;
+    length = bounded_wcslen(known_path, output_capacity);
+    if (length == 0) {
+        status = JVMAN_INSTALL_PATH_NOT_FOUND;
+    } else if (length >= output_capacity ||
+               !copy_wstr(output, output_capacity, known_path)) {
+        status = JVMAN_INSTALL_PATH_TOO_LONG;
+    } else {
+        trim_path_tail(output);
+    }
+    CoTaskMemFree(known_path);
+    return status;
+}
+
+JvmanInstallStatus jvman_install_paths_machine_default(
+    JvmanInstallPaths *paths) {
+    wchar_t program_files[JVMAN_INSTALL_PATH_CHARS];
+    wchar_t program_data[JVMAN_INSTALL_PATH_CHARS];
+    wchar_t install_dir[JVMAN_INSTALL_PATH_CHARS];
+    wchar_t data_home[JVMAN_INSTALL_PATH_CHARS];
+    JvmanInstallStatus status;
+    if (!paths) return JVMAN_INSTALL_INVALID_ARGUMENT;
+    memset(paths, 0, sizeof(*paths));
+    status = get_known_folder_path(&JVMAN_FOLDERID_PROGRAM_FILES, program_files,
+                                   sizeof(program_files) /
+                                       sizeof(program_files[0]));
+    if (status != JVMAN_INSTALL_OK) return status;
+    status = get_known_folder_path(&JVMAN_FOLDERID_PROGRAM_DATA, program_data,
+                                   sizeof(program_data) /
+                                       sizeof(program_data[0]));
+    if (status != JVMAN_INSTALL_OK) return status;
+    if (!join_path(install_dir, sizeof(install_dir) / sizeof(install_dir[0]),
+                   program_files, L"jvman") ||
+        !join_path(data_home, sizeof(data_home) / sizeof(data_home[0]),
+                   program_data, L"jvman")) {
+        return JVMAN_INSTALL_PATH_TOO_LONG;
+    }
+    return jvman_install_paths_init(paths, install_dir, data_home);
+}
+
 static JvmanInstallStatus ensure_directory_tree(const wchar_t *path) {
     size_t length;
     size_t index;
@@ -560,9 +631,8 @@ JvmanInstallStatus jvman_setup_payload_open(
             return JVMAN_INSTALL_PATH_REPARSE;
         }
     }
-    handle = CreateFileW(setup_path, GENERIC_READ,
-                         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                         NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    handle = CreateFileW(setup_path, GENERIC_READ, FILE_SHARE_READ, NULL,
+                         OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
     if (handle == INVALID_HANDLE_VALUE) return status_from_error(GetLastError());
     if (!get_size(handle, &file_size) || file_size < JVMAN_SETUP_FOOTER_SIZE ||
         !read_at(handle, file_size - JVMAN_SETUP_FOOTER_SIZE,
@@ -811,9 +881,8 @@ static JvmanInstallStatus copy_file_atomically(const wchar_t *source_path,
         (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0) return JVMAN_INSTALL_PATH_REPARSE;
     status = check_target_file(target_path);
     if (status != JVMAN_INSTALL_OK) return status;
-    source = CreateFileW(source_path, GENERIC_READ,
-                         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                         NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    source = CreateFileW(source_path, GENERIC_READ, FILE_SHARE_READ, NULL,
+                         OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
     if (source == INVALID_HANDLE_VALUE) return status_from_error(GetLastError());
     if (!get_size(source, &source_size) ||
         source_size > JVMAN_SETUP_PAYLOAD_LIMIT + JVMAN_SETUP_PREFIX_LIMIT) {
@@ -997,6 +1066,76 @@ static int same_as_current_module(const wchar_t *path) {
            path_equal(current, path);
 }
 
+static JvmanInstallStatus rename_to_delete_tombstone(
+    const wchar_t *path,
+    wchar_t tombstone_path[],
+    size_t tombstone_capacity) {
+    wchar_t directory[JVMAN_INSTALL_PATH_CHARS];
+    const wchar_t *slash;
+    size_t directory_length;
+    unsigned int attempt;
+    if (!path || !tombstone_path || tombstone_capacity == 0) {
+        return JVMAN_INSTALL_INVALID_ARGUMENT;
+    }
+    slash = wcsrchr(path, L'\\');
+    if (!slash || slash == path) return JVMAN_INSTALL_INVALID_PATH;
+    directory_length = (size_t)(slash - path);
+    if (directory_length >= sizeof(directory) / sizeof(directory[0])) {
+        return JVMAN_INSTALL_PATH_TOO_LONG;
+    }
+    memcpy(directory, path, directory_length * sizeof(*directory));
+    directory[directory_length] = L'\0';
+
+    for (attempt = 0; attempt < JVMAN_TEMP_ATTEMPTS; ++attempt) {
+        unsigned char random[16];
+        int written;
+        JvmanInstallStatus status;
+        DWORD error;
+        if (!RtlGenRandom(random, (ULONG)sizeof(random))) {
+            return JVMAN_INSTALL_IO_ERROR;
+        }
+        written = _snwprintf(
+            tombstone_path, tombstone_capacity,
+            L"%ls\\.jvman-delete-"
+            L"%02x%02x%02x%02x%02x%02x%02x%02x"
+            L"%02x%02x%02x%02x%02x%02x%02x%02x.tmp",
+            directory, (unsigned int)random[0], (unsigned int)random[1],
+            (unsigned int)random[2], (unsigned int)random[3],
+            (unsigned int)random[4], (unsigned int)random[5],
+            (unsigned int)random[6], (unsigned int)random[7],
+            (unsigned int)random[8], (unsigned int)random[9],
+            (unsigned int)random[10], (unsigned int)random[11],
+            (unsigned int)random[12], (unsigned int)random[13],
+            (unsigned int)random[14], (unsigned int)random[15]);
+        if (written < 0 || (size_t)written >= tombstone_capacity) {
+            return JVMAN_INSTALL_PATH_TOO_LONG;
+        }
+        status = validate_target_path(tombstone_path);
+        if (status != JVMAN_INSTALL_OK) return status;
+        if (MoveFileExW(path, tombstone_path, MOVEFILE_WRITE_THROUGH)) {
+            DWORD attributes = GetFileAttributesW(tombstone_path);
+            if (attributes == INVALID_FILE_ATTRIBUTES) {
+                error = GetLastError();
+            } else if ((attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+                error = ERROR_CANT_RESOLVE_FILENAME;
+            } else if ((attributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
+                error = ERROR_DIRECTORY;
+            } else {
+                return JVMAN_INSTALL_OK;
+            }
+            /* Preserve a stable retry path if a race changed the source after
+             * its whitelist checks but before the atomic rename. */
+            (void)MoveFileExW(tombstone_path, path, MOVEFILE_WRITE_THROUGH);
+            return status_from_error(error);
+        }
+        error = GetLastError();
+        if (error != ERROR_FILE_EXISTS && error != ERROR_ALREADY_EXISTS) {
+            return status_from_error(error);
+        }
+    }
+    return JVMAN_INSTALL_IO_ERROR;
+}
+
 static JvmanInstallStatus remove_whitelisted_file(const wchar_t *path) {
     DWORD attributes;
     if (!path) return JVMAN_INSTALL_INVALID_ARGUMENT;
@@ -1017,13 +1156,109 @@ static JvmanInstallStatus remove_whitelisted_file(const wchar_t *path) {
     if (!DeleteFileW(path)) {
         DWORD error = GetLastError();
         if (error == ERROR_SHARING_VIOLATION || error == ERROR_ACCESS_DENIED) {
-            if (MoveFileExW(path, NULL, MOVEFILE_DELAY_UNTIL_REBOOT) != 0) {
+            wchar_t tombstone_path[JVMAN_INSTALL_PATH_CHARS];
+            JvmanInstallStatus status = rename_to_delete_tombstone(
+                path, tombstone_path,
+                sizeof(tombstone_path) / sizeof(tombstone_path[0]));
+            if (status != JVMAN_INSTALL_OK) return status;
+            if (MoveFileExW(tombstone_path, NULL,
+                            MOVEFILE_DELAY_UNTIL_REBOOT) != 0) {
                 return JVMAN_INSTALL_OK;
             }
+            error = GetLastError();
+            /* Scheduling can fail because of policy or registry access.  Put
+             * the file back when possible so a later cleanup can retry it by
+             * its authenticated whitelist name. */
+            (void)MoveFileExW(tombstone_path, path, MOVEFILE_WRITE_THROUGH);
         }
         return status_from_error(error);
     }
     return JVMAN_INSTALL_OK;
+}
+
+typedef struct JvmanInstallBackupPaths {
+    wchar_t jvman[JVMAN_INSTALL_PATH_CHARS];
+    wchar_t uninstall[JVMAN_INSTALL_PATH_CHARS];
+    wchar_t marker[JVMAN_INSTALL_PATH_CHARS];
+} JvmanInstallBackupPaths;
+
+static JvmanInstallStatus install_backup_paths(
+    const JvmanInstallPaths *paths, JvmanInstallPaths *normalized,
+    JvmanInstallBackupPaths *backups) {
+    JvmanInstallStatus status;
+    if (!paths || !normalized || !backups) {
+        return JVMAN_INSTALL_INVALID_ARGUMENT;
+    }
+    memset(backups, 0, sizeof(*backups));
+    status = validate_paths(paths, normalized);
+    if (status != JVMAN_INSTALL_OK) return status;
+    if (!join_path(backups->jvman,
+                   sizeof(backups->jvman) / sizeof(backups->jvman[0]),
+                   normalized->install_dir, L".jvman.exe.rollback") ||
+        !join_path(backups->uninstall,
+                   sizeof(backups->uninstall) /
+                       sizeof(backups->uninstall[0]),
+                   normalized->install_dir, L".uninstall.exe.rollback") ||
+        !join_path(backups->marker,
+                   sizeof(backups->marker) / sizeof(backups->marker[0]),
+                   normalized->install_dir, L".install.marker.rollback")) {
+        return JVMAN_INSTALL_PATH_TOO_LONG;
+    }
+    return JVMAN_INSTALL_OK;
+}
+
+JvmanInstallStatus jvman_install_backup_discard(
+    const JvmanInstallPaths *paths) {
+    JvmanInstallPaths normalized;
+    JvmanInstallBackupPaths backups;
+    JvmanInstallStatus status;
+    status = install_backup_paths(paths, &normalized, &backups);
+    if (status != JVMAN_INSTALL_OK) return status;
+    status = remove_whitelisted_file(backups.jvman);
+    if (status != JVMAN_INSTALL_OK) return status;
+    status = remove_whitelisted_file(backups.uninstall);
+    if (status != JVMAN_INSTALL_OK) return status;
+    return remove_whitelisted_file(backups.marker);
+}
+
+JvmanInstallStatus jvman_install_backup_create(
+    const JvmanInstallPaths *paths) {
+    JvmanInstallPaths normalized;
+    JvmanInstallBackupPaths backups;
+    JvmanInstallStatus status;
+    status = install_backup_paths(paths, &normalized, &backups);
+    if (status != JVMAN_INSTALL_OK) return status;
+    status = copy_file_atomically(normalized.jvman_path, backups.jvman);
+    if (status != JVMAN_INSTALL_OK) return status;
+    status = copy_file_atomically(normalized.uninstall_path,
+                                  backups.uninstall);
+    if (status != JVMAN_INSTALL_OK) {
+        (void)remove_whitelisted_file(backups.jvman);
+        return status;
+    }
+    status = copy_file_atomically(normalized.marker_path, backups.marker);
+    if (status != JVMAN_INSTALL_OK) {
+        (void)remove_whitelisted_file(backups.uninstall);
+        (void)remove_whitelisted_file(backups.jvman);
+    }
+    return status;
+}
+
+JvmanInstallStatus jvman_install_backup_restore(
+    const JvmanInstallPaths *paths) {
+    JvmanInstallPaths normalized;
+    JvmanInstallBackupPaths backups;
+    JvmanInstallStatus status;
+    status = install_backup_paths(paths, &normalized, &backups);
+    if (status != JVMAN_INSTALL_OK) return status;
+    status = copy_file_atomically(backups.jvman, normalized.jvman_path);
+    if (status != JVMAN_INSTALL_OK) return status;
+    status = copy_file_atomically(backups.uninstall,
+                                  normalized.uninstall_path);
+    if (status != JVMAN_INSTALL_OK) return status;
+    status = copy_file_atomically(backups.marker, normalized.marker_path);
+    if (status != JVMAN_INSTALL_OK) return status;
+    return jvman_install_backup_discard(&normalized);
 }
 
 static int data_entry_name_equal(const wchar_t *name, size_t length,
@@ -1285,6 +1520,14 @@ JvmanInstallStatus jvman_install_remove_data(
     return status;
 }
 
+JvmanInstallStatus jvman_install_remove_payload(
+    const JvmanInstallPaths *paths) {
+    JvmanInstallPaths normalized;
+    JvmanInstallStatus status = validate_paths(paths, &normalized);
+    if (status != JVMAN_INSTALL_OK) return status;
+    return remove_whitelisted_file(normalized.jvman_path);
+}
+
 JvmanInstallStatus jvman_install_uninstall(
     const JvmanInstallPaths *paths) {
     JvmanInstallPaths normalized;
@@ -1292,7 +1535,7 @@ JvmanInstallStatus jvman_install_uninstall(
     DWORD attributes;
     status = validate_paths(paths, &normalized);
     if (status != JVMAN_INSTALL_OK) return status;
-    status = remove_whitelisted_file(normalized.jvman_path);
+    status = jvman_install_remove_payload(&normalized);
     if (status != JVMAN_INSTALL_OK) return status;
     if (same_as_current_module(normalized.uninstall_path)) {
         return JVMAN_INSTALL_SELF_CLEANUP_REQUIRED;

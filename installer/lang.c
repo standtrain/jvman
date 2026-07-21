@@ -26,16 +26,16 @@ static const wchar_t *const lang_table[JVMAN_LANG_COUNT][JVMAN_STR_COUNT] = {
         [JVMAN_STR_CANCEL]               = L"Cancel",
         [JVMAN_STR_LANG_SYSTEM]          = L"System default",
 
-        [JVMAN_STR_INSTALL_PROMPT]       = L"Install jvman for the current Windows user?\n\n"
-                                            L"The default PATH option changes only your user environment.\n"
-                                            L"System PATH can be selected later and requires administrator permission.",
+        [JVMAN_STR_INSTALL_PROMPT]       = L"Use the default jvman install directory?\n\n"
+                                            L"Choose No to select another folder for a current-user install.\n"
+                                            L"An all-users install always uses the protected Program Files directory.",
         [JVMAN_STR_BROWSE_TITLE]         = L"Choose the jvman install directory",
         [JVMAN_STR_ADD_PATH_PROMPT]      = L"Add jvman to PATH?\n\n"
                                             L"Current-user installs also add the stable current\\bin path.\n"
                                             L"Existing PATH entries are kept and duplicates are skipped.",
         [JVMAN_STR_PATH_SCOPE_PROMPT]    = L"Add PATH entries for all users?\n\n"
                                             L"Choose Yes for the system PATH. Choose No for only your user PATH.\n"
-                                            L"System PATH requires running this installer as administrator.",
+                                            L"Yes installs jvman in Program Files and Windows will request administrator permission.",
         [JVMAN_STR_CONFIGURE_JAVA_PROMPT]= L"A valid jvman current JDK exists. Configure JAVA_HOME?\n\n"
                                             L"The stable current\\bin path follows the earlier PATH choice.\n"
                                             L"This may replace the current user JAVA_HOME value.",
@@ -94,16 +94,18 @@ static const wchar_t *const lang_table[JVMAN_LANG_COUNT][JVMAN_STR_COUNT] = {
                                               L"Options:\n"
                                               L"  /S, /SILENT, or /QUIET       silent install\n"
                                               L"  /DIR=<path>                  choose install directory\n"
+                                              L"  /LANG=en|zh-CN               select installer and CLI language\n"
                                               L"  /ADD_TO_PATH                 enable PATH integration\n"
                                               L"  /USER_PATH                   add program and current\\bin paths for current user\n"
-                                              L"  /SYSTEM_PATH                 add PATH entries for all users\n"
+                                              L"  /SYSTEM_PATH                 install in Program Files and add system PATH\n"
                                               L"  /NO_PATH                     do not modify PATH\n"
                                               L"  /CONFIGURE_JAVA              configure current-user JAVA_HOME\n"
                                               L"  /NO_CONFIGURE_JAVA           restore installer-managed JAVA_HOME\n"
                                               L"  /REPLACE_JAVA_HOME          allow replacing user JAVA_HOME\n"
                                               L"  /DISCOVER                    register discovered JDKs after install\n"
                                               L"  /PORTABLE /DIR=<path>        extract only jvman.exe\n"
-                                              L"  /UNINSTALL                   remove this installation\n"
+                                              L"  /UNINSTALL                   remove the current-user installation\n"
+                                              L"  /UNINSTALL /MACHINE          remove the all-users installation\n"
                                               L"  /REMOVE_DATA                 also remove data except managed JDKs\n"
                                               L"  /REMOVE_DATA /REMOVE_JDKS    also remove managed JDKs",
     },
@@ -117,16 +119,16 @@ static const wchar_t *const lang_table[JVMAN_LANG_COUNT][JVMAN_STR_COUNT] = {
         [JVMAN_STR_CANCEL]               = L"取消",
         [JVMAN_STR_LANG_SYSTEM]          = L"跟随系统",
 
-        [JVMAN_STR_INSTALL_PROMPT]       = L"为当前 Windows 用户安装 jvman？\n\n"
-                                            L"默认 PATH 选项仅修改当前用户环境变量。\n"
-                                            L"稍后可选择系统 PATH，需要管理员权限。",
+        [JVMAN_STR_INSTALL_PROMPT]       = L"使用 jvman 默认安装目录？\n\n"
+                                            L"选择“否”可为当前用户安装选择其他目录。\n"
+                                            L"为所有用户安装时始终使用受保护的 Program Files 目录。",
         [JVMAN_STR_BROWSE_TITLE]         = L"选择 jvman 安装目录",
         [JVMAN_STR_ADD_PATH_PROMPT]      = L"将 jvman 添加到 PATH？\n\n"
                                             L"当前用户安装还会添加稳定的 current\\bin 路径。\n"
                                             L"已有的 PATH 条目将被保留，重复项会自动跳过。",
         [JVMAN_STR_PATH_SCOPE_PROMPT]    = L"为所有用户添加 PATH 条目？\n\n"
                                             L"选择“是”将写入系统 PATH，选择“否”仅写入当前用户 PATH。\n"
-                                            L"系统 PATH 需要以管理员身份运行此安装程序。",
+                                            L"选择“是”会将 jvman 安装到 Program Files，Windows 随后会请求管理员权限。",
         [JVMAN_STR_CONFIGURE_JAVA_PROMPT]= L"检测到有效的 jvman current JDK。是否配置 JAVA_HOME？\n\n"
                                             L"稳定的 current\\bin 路径由前面的 PATH 选择管理。\n"
                                             L"这可能会替换当前用户的 JAVA_HOME 值。",
@@ -185,16 +187,18 @@ static const wchar_t *const lang_table[JVMAN_LANG_COUNT][JVMAN_STR_COUNT] = {
                                               L"选项：\n"
                                               L"  /S、/SILENT 或 /QUIET        静默安装\n"
                                               L"  /DIR=<路径>                  选择安装目录\n"
+                                              L"  /LANG=en|zh-CN               选择安装器和 CLI 语言\n"
                                               L"  /ADD_TO_PATH                 启用 PATH 集成\n"
                                               L"  /USER_PATH                   为当前用户添加程序和 current\\bin 路径\n"
-                                              L"  /SYSTEM_PATH                 为所有用户添加 PATH 条目\n"
+                                              L"  /SYSTEM_PATH                 安装到 Program Files 并添加系统 PATH\n"
                                               L"  /NO_PATH                     不修改 PATH\n"
                                               L"  /CONFIGURE_JAVA              配置当前用户 JAVA_HOME\n"
                                               L"  /NO_CONFIGURE_JAVA           恢复安装器管理的 JAVA_HOME\n"
                                               L"  /REPLACE_JAVA_HOME           允许替换用户 JAVA_HOME\n"
                                               L"  /DISCOVER                    安装后注册发现的 JDK\n"
                                               L"  /PORTABLE /DIR=<路径>        仅解压 jvman.exe\n"
-                                              L"  /UNINSTALL                   移除此安装\n"
+                                              L"  /UNINSTALL                   移除当前用户安装\n"
+                                              L"  /UNINSTALL /MACHINE          移除所有用户安装\n"
                                               L"  /REMOVE_DATA                 同时删除托管 JDK 之外的数据\n"
                                               L"  /REMOVE_DATA /REMOVE_JDKS    同时删除托管 JDK",
     },
@@ -427,6 +431,10 @@ int jvman_lang_set(JvmanInstallerLang lang) {
     if ((unsigned int)lang >= (unsigned int)JVMAN_LANG_COUNT) return -1;
     active_lang = lang;
     return 0;
+}
+
+JvmanInstallerLang jvman_lang_current(void) {
+    return active_lang;
 }
 
 const wchar_t *jvman_lang_str(JvmanStringId id) {

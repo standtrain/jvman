@@ -87,6 +87,9 @@ void jvman_lang_use_system_default(void);
 /* 设置当前语言，无效值不会改变当前语言 */
 int jvman_lang_set(JvmanInstallerLang lang);
 
+/* Return the language currently used for installer UI and status text. */
+JvmanInstallerLang jvman_lang_current(void);
+
 /* 获取当前语言下指定 ID 的字符串 */
 const wchar_t *jvman_lang_str(JvmanStringId id);
 

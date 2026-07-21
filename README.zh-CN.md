@@ -4,7 +4,7 @@
 
 `jvman` 是一个用 C11 编写的轻量级 Java 版本管理器。它借鉴 nvm 的使用方式，用一个原生可执行文件完成 JDK 下载、注册、切换、查询和命令隔离执行；核心代码不链接第三方运行库。
 
-本文档对应 jvman `0.2.0`。
+本文档对应 jvman `0.2.1`。
 
 首版以 Windows 10+ 为主要目标，同时保留 Linux/macOS 平台层。Windows 切换使用 NTFS directory junction，通常不需要管理员权限，也不需要开启 Developer Mode。
 
@@ -46,36 +46,37 @@ $env:Path = 'C:\msys64\ucrt64\bin;' + $env:Path
 mingw32-make.exe
 ```
 
-构建后可直接运行 `.\jvman.exe`，也可以把它放入一个用户可写且已加入 `PATH` 的目录。`jvman` 命令行本身不会自动修改注册表、系统 `PATH` 或 PowerShell profile。Windows 构建还会生成可选的 `jvman-setup.exe`，在用户明确确认后可配置当前用户或系统 `PATH`；Make 产物位于 `.\jvman-setup.exe`，CMake 产物位于 `<build>\jvman-setup.exe`。
+构建后可直接运行 `.\jvman.exe`，也可以把它放入一个用户可写且已加入 `PATH` 的目录。`jvman` 命令行不会自动修改系统 `PATH` 或 PowerShell profile；Windows 上只有 `jvman language` 会在 `HKCU\Software\jvman\Preferences` 写入当前用户语言偏好。Windows 构建还会生成可选的 `jvman-setup.exe`；Make 产物位于 `.\jvman-setup.exe`，CMake 产物位于 `<build>\jvman-setup.exe`。
 
 ## Windows 安装程序
 
-`jvman-setup.exe` 是原生 Win32 安装程序，程序文件和安装器状态默认按当前用户管理，不请求管理员权限；只有用户显式选择系统 `PATH` 时才会写入机器级设置并要求管理员权限。默认位置如下：
+`jvman-setup.exe` 是原生 Win32 安装程序。默认按当前用户安装，不请求管理员权限；选择“所有用户”时才通过 Windows UAC 启动机器安装流程。manifest 仍为 `asInvoker`，所以当前用户安装和便携解压不会无条件提权。默认位置如下：
 
-| 项目 | 默认位置 |
-| --- | --- |
-| 程序文件 | `%LOCALAPPDATA%\Programs\jvman` |
-| jvman 数据 | `%LOCALAPPDATA%\jvman`（或有效的 `JVMAN_HOME`） |
-| 安装器状态 | `HKCU\Software\jvman\Installer` |
+| 项目 | 当前用户 | 所有用户 |
+| --- | --- | --- |
+| 程序文件 | `%LOCALAPPDATA%\Programs\jvman` | `%ProgramFiles%\jvman` |
+| 运行数据 | `%LOCALAPPDATA%\jvman`（或 `JVMAN_HOME`） | 按每个调用用户独立解析 |
+| 安装器状态 | `HKCU\Software\jvman\Installer` | `HKLM\Software\jvman\Installer` |
 
 非静默运行会先显示由安装器内置语言表动态生成的语言下拉框。
 默认选中“跟随系统”，并根据 Windows 界面语言决定实际界面；也可显式选择
-English 或简体中文。取消语言选择会直接退出安装程序。
+English 或简体中文。取消语言选择会直接退出安装程序。安装成功后，确认的语言会同时写入安装记录和发起安装的 Windows 用户 CLI 偏好。`JVMAN_LANG` 仍可覆盖当前进程，之后也可用 `jvman language` 修改已保存偏好。
 
-不带参数启动时，安装器会依次询问是否启用 `PATH` 集成、PATH 项写入“仅当前用户”还是“所有用户”、是否用有效的 `current` JDK 配置 `JAVA_HOME`，以及是否在安装后执行 `jvman discover --register`。当前用户 PATH 集成会同时加入程序目录和稳定的 `<数据目录>\current\bin`；即使尚未选择 JDK，也会预先加入该稳定路径，后续 `jvman use` 只需重定向 `current`。系统 PATH 集成仅加入程序目录。已有 PATH 项会保留，精确或规范化后的重复项不会再次加入。
+不带参数启动时，安装器会依次询问是否启用 `PATH` 集成、PATH 项写入“仅当前用户”还是“所有用户”、是否用有效的 `current` JDK 配置 `JAVA_HOME`，以及是否在安装后执行 `jvman discover --register`。当前用户 PATH 集成会同时加入程序目录和稳定的 `<数据目录>\current\bin`；即使尚未选择 JDK，也会预先加入该稳定路径，后续 `jvman use` 只需重定向 `current`。所有用户安装仅把受保护的程序目录加入系统 PATH。已有 PATH 项会保留，精确或规范化后的重复项不会再次加入。
 
 常用命令行参数：
 
 ```text
-jvman-setup.exe /S [/DIR=<绝对路径>] [/USER_PATH|/SYSTEM_PATH] [/NO_PATH]
+jvman-setup.exe /S [/LANG=en|zh-CN] [/DIR=<绝对路径>] [/USER_PATH|/SYSTEM_PATH] [/NO_PATH]
 jvman-setup.exe /CONFIGURE_JAVA [/REPLACE_JAVA_HOME]
 jvman-setup.exe /DISCOVER
 jvman-setup.exe /PORTABLE /DIR=<绝对路径>
 jvman-setup.exe /UNINSTALL [/S] [/REMOVE_DATA [/REMOVE_JDKS]]
+jvman-setup.exe /UNINSTALL /MACHINE [/S]
 jvman-setup.exe /HELP
 ```
 
-`/S`、`/SILENT` 和 `/QUIET` 表示静默安装。`/ADD_TO_PATH` 显式开启 `PATH` 集成。`/USER_PATH` 把程序目录和稳定的 `<数据目录>\current\bin` 写入当前用户环境，并且是默认值；`/SYSTEM_PATH`（也可用 `/MACHINE_PATH` 或 `/ALL_USERS_PATH`）只把程序目录写入系统环境，需要管理员权限，不会把用户可写的 JDK 目录加入系统 PATH。`/NO_PATH`（或 `/NO_ADD_TO_PATH`）关闭 PATH 更新；重复安装时还会删除此前由本安装器拥有的程序和 Java PATH 项。`/CONFIGURE_JAVA` 只配置当前用户 `JAVA_HOME`，并要求 `<数据目录>\current\bin\java.exe` 与 `javac.exe` 均存在；如果已有不同的 `JAVA_HOME`，没有 `/REPLACE_JAVA_HOME` 时会报告冲突并保持原值。`/DISCOVER` 只在安装完成后执行发现，不会自动选择当前 JDK。
+`/S`、`/SILENT` 和 `/QUIET` 表示静默安装。`/LANG=en` 与 `/LANG=zh-CN` 可跳过下拉框并指定安装器及安装后 CLI 的语言。`/ADD_TO_PATH` 显式开启 `PATH` 集成。`/USER_PATH` 把程序目录和稳定的 `<数据目录>\current\bin` 写入当前用户环境，并且是默认值；`/SYSTEM_PATH`（也可用 `/MACHINE_PATH` 或 `/ALL_USERS_PATH`）会把程序安装到受保护的 Program Files、把状态写入 HKLM、加入系统 PATH，并按需请求 UAC。机器模式不会把用户可写的 JDK 目录加入系统 PATH。`/NO_PATH`（或 `/NO_ADD_TO_PATH`）关闭 PATH 更新；重复安装时还会删除此前由本安装器拥有的程序和 Java PATH 项。升级旧版“当前用户安装 + 系统 PATH”状态时，只会提权一个窄范围清理进程来移除已认证的旧系统 PATH 项，随后由原用户进程更新 HKCU，不会把整个用户安装流程放到管理员账户下执行。`/CONFIGURE_JAVA` 只配置当前用户 `JAVA_HOME`，并要求 `<数据目录>\current\bin\java.exe` 与 `javac.exe` 均存在；如果已有不同的 `JAVA_HOME`，没有 `/REPLACE_JAVA_HOME` 时会报告冲突并保持原值。`/DISCOVER` 只在当前用户安装完成后执行发现，不会自动选择当前 JDK。
 
 `/NO_CONFIGURE_JAVA` 会关闭 `JAVA_HOME` 配置；重复安装时，如果该变量曾由本安装器管理，会恢复原先的值。它不会覆盖单独作出的 PATH 选择。
 
@@ -91,9 +92,11 @@ jvman init powershell | Invoke-Expression
 
 无人值守部署时，请将需要的参数与 `/S` 组合使用；不带 `/S` 时会显示相同选项的图形确认对话框。
 
-`/PORTABLE /DIR=...` 只把 `jvman.exe` 解压到显式指定的目录，不创建 `JVMAN_HOME`，不写注册表，也不修改 `PATH` 或 `JAVA_HOME`，适合 U 盘或项目目录。普通卸载可从“应用和功能”、`/UNINSTALL` 或已安装命令行的 `jvman uninstall` 进入。交互式卸载会先选择范围，再显示最终高风险确认；`/S` 仅用于无人值守场景。
+`/PORTABLE /DIR=...` 只把 `jvman.exe` 解压到显式指定的目录，不创建 `JVMAN_HOME`，不写注册表，也不修改 `PATH` 或 `JAVA_HOME`，适合 U 盘或项目目录。普通卸载可执行 `jvman uninstall`，也可从“应用和功能”或 `/UNINSTALL` 进入；机器安装使用 `/UNINSTALL /MACHINE` 并对称请求 UAC。交互式卸载会先选择范围，再显示最终高风险确认；`/S` 仅用于无人值守场景。
 
 卸载范围分为三级：默认只删除程序本体和本安装器拥有的环境变量；`/REMOVE_DATA` 还会删除 `JVMAN_HOME` 中除顶层 `jdks` 目录外的数据；`/REMOVE_DATA /REMOVE_JDKS` 会删除整个 `JVMAN_HOME` 及其中由 jvman 管理的 JDK。`/REMOVE_JDKS` 不能单独使用。删除过程不会跟随 junction 或符号链接，通过外部路径注册的 JDK 永远不会被删除。静默卸载属于破坏性操作，应仅在调用方已明确确认删除范围后使用。
+
+数据删除范围仅适用于当前用户安装。机器卸载始终只删除共享程序、HKLM 安装记录和系统 PATH 项；`/MACHINE` 不能与 `/REMOVE_DATA` 或 `/REMOVE_JDKS` 组合，因为每个用户的 CLI 数据目录都是独立解析的。
 
 ## 快速开始
 
@@ -149,15 +152,23 @@ jvman list
 jvman current
 jvman which [名称]
 jvman remove <名称>
-jvman uninstall [<名称>]
+jvman uninstall
 jvman exec <名称> [--] <命令> [参数...]
 jvman init [powershell|cmd|sh]
 jvman doctor
 jvman update [--check] [--version <版本>]
+jvman language [--list|en|zh-CN]
 jvman home
 ```
 
-别名：`ls` 等同于 `list`，`default` 等同于 `use`，`uninstall <名称>` 等同于 `remove <名称>`。在 Windows 上，无名称的 `jvman uninstall` 会校验当前副本对应的安装器元数据与安装标记，再启动该安装的卸载程序；便携副本或未注册副本会被拒绝。
+别名：`ls` 等同于 `list`，`default` 等同于 `use`。为保持兼容，
+`jvman uninstall <名称>` 仍等同于 `jvman remove <名称>`；不带名称时，
+`jvman uninstall` 会启动 Windows 已注册的卸载程序。
+
+`jvman language` 显示当前界面语言。Windows 上可用 `jvman language en` 或
+`jvman language zh-CN` 保存当前用户偏好；`JVMAN_LANG=en` 和
+`JVMAN_LANG=zh-CN` 会仅对当前进程覆盖安装器记录与已保存偏好。其他平台支持该
+环境变量和 `--list`，但不会写入持久偏好。
 
 `jvman source` 显示当前模式。内置源包括 `tsinghua`（清华 TUNA Adoptium 镜像）、
 `huawei`（毕昇 JDK）、`aliyun`（Dragonwell）、`adoptium` 和 `foojay`；`auto`
@@ -277,7 +288,7 @@ jvman/
 
 ## 当前边界
 
-`0.2.0` 会在国际源、清华、华为、阿里云及用户自定义目录之间自动测速选源，远程安装只接受 Java 主版本。本地发现可以识别常见 JDK 厂商，但托管 JRE、EA/GraalVM、复杂版本范围、项目级 `.java-version`、独立签名发布清单，以及 CLI 自动修改持久环境设置暂不实现。
+`0.2.1` 会在国际源、清华、华为、阿里云及用户自定义目录之间自动测速选源，远程安装只接受 Java 主版本。本地发现可以识别常见 JDK 厂商，但托管 JRE、EA/GraalVM、复杂版本范围、项目级 `.java-version`、独立签名发布清单，以及 CLI 自动修改持久环境设置暂不实现。
 
 远程包必须匹配所选下载源返回的 SHA-256；用户传入 `--sha256` 时还会再校验用户固定值。该校验可以发现下载损坏或包不匹配，但不等价于独立的发布签名验证。
 
