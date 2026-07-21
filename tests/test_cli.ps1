@@ -723,23 +723,45 @@ try {
     if (-not (Test-Path -LiteralPath (Join-Path $stateRoot 'current\bin\java.exe'))) {
         throw 'current junction does not expose the selected JDK'
     }
+    $safeJvmanHome = $env:JVMAN_HOME
+    try {
+        $env:JVMAN_HOME = Join-Path $testRoot 'unsafe%PATH%'
+        Invoke-JvmanExpectFailure init cmd
+    }
+    finally {
+        $env:JVMAN_HOME = $safeJvmanHome
+    }
     $cmdInitProbe = Join-Path $testRoot 'cmd-init-probe.cmd'
     $oldCmdBinaryDir = [Environment]::GetEnvironmentVariable(
         'JVMAN_TEST_BINARY_DIR', 'Process')
     $oldCmdExpectedHome = [Environment]::GetEnvironmentVariable(
         'JVMAN_TEST_EXPECTED_HOME', 'Process')
+    $oldCmdExpectedState = [Environment]::GetEnvironmentVariable(
+        'JVMAN_TEST_EXPECTED_STATE', 'Process')
+    $oldCmdOutput = [Environment]::GetEnvironmentVariable(
+        'JVMAN_TEST_OUTPUT', 'Process')
+    $cmdUseOutput = Join-Path ([IO.Path]::GetTempPath()) (
+        'jvman-cmd-use-' + [guid]::NewGuid().ToString('N') + '.txt')
     try {
         $cmdExpectedHome = Join-Path ((Invoke-Jvman home).Trim()) 'current'
         [Environment]::SetEnvironmentVariable(
             'JVMAN_TEST_BINARY_DIR', (Split-Path -Parent $binaryPath), 'Process')
         [Environment]::SetEnvironmentVariable(
             'JVMAN_TEST_EXPECTED_HOME', $cmdExpectedHome, 'Process')
+        [Environment]::SetEnvironmentVariable(
+            'JVMAN_TEST_EXPECTED_STATE', $stateRoot, 'Process')
+        [Environment]::SetEnvironmentVariable(
+            'JVMAN_TEST_OUTPUT', $cmdUseOutput, 'Process')
         Set-Content -LiteralPath $cmdInitProbe -Encoding ASCII -Value @(
             '@echo off',
             'setlocal DisableDelayedExpansion',
             'set "JAVA_HOME="',
             'set "PATH=%JVMAN_TEST_BINARY_DIR%;%SystemRoot%\System32"',
-            'for /f "delims=" %%L in (''jvman.exe init cmd'') do @call %%L',
+            'for /f "delims=" %%L in (''jvman.exe init cmd'') do @%%L',
+            'set "JVMAN_PATH_AFTER_INIT=%PATH%"',
+            'for /f "delims=" %%L in (''jvman.exe init cmd'') do @%%L',
+            'if not "%PATH%"=="%JVMAN_PATH_AFTER_INIT%" exit /b 69',
+            'set "JVMAN_PATH_AFTER_INIT="',
             'if /i not "%JAVA_HOME%"=="%JVMAN_TEST_EXPECTED_HOME%" (',
             '  echo CMD JAVA_HOME mismatch: actual="%JAVA_HOME%" expected="%JVMAN_TEST_EXPECTED_HOME%" 1>&2',
             '  exit /b 61',
@@ -750,9 +772,18 @@ try {
             '    exit /b 62',
             '  )',
             '  if not exist "%%~fJ\java.exe" exit /b 63',
-            '  exit /b 0',
+            '  goto path-ok',
             ')',
-            'exit /b 64'
+            'exit /b 64',
+            ':path-ok',
+            'jvman.exe use b > "%JVMAN_TEST_OUTPUT%"',
+            'if errorlevel 1 exit /b 65',
+            'findstr /c:"jvman init" "%JVMAN_TEST_OUTPUT%" >nul && exit /b 66',
+            'if not exist "%JVMAN_TEST_EXPECTED_STATE%\current\b.marker" exit /b 67',
+            'jvman.exe use a >nul',
+            'if errorlevel 1 exit /b 68',
+            'del /q "%JVMAN_TEST_OUTPUT%" >nul 2>&1',
+            'exit /b 0'
         )
         & cmd.exe /d /c $cmdInitProbe
         if ($LASTEXITCODE -ne 0) {
@@ -764,18 +795,52 @@ try {
             'JVMAN_TEST_BINARY_DIR', $oldCmdBinaryDir, 'Process')
         [Environment]::SetEnvironmentVariable(
             'JVMAN_TEST_EXPECTED_HOME', $oldCmdExpectedHome, 'Process')
+        [Environment]::SetEnvironmentVariable(
+            'JVMAN_TEST_EXPECTED_STATE', $oldCmdExpectedState, 'Process')
+        [Environment]::SetEnvironmentVariable(
+            'JVMAN_TEST_OUTPUT', $oldCmdOutput, 'Process')
         Remove-Item -LiteralPath $cmdInitProbe -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $cmdUseOutput -Force -ErrorAction SilentlyContinue
     }
     $pathBeforeInitializedUse = $env:Path
+    $javaHomeBeforeInitializedUse = $env:JAVA_HOME
     try {
-        $env:Path = (Join-Path $stateRoot 'current\bin') + ';' + $env:Path
-        $initializedUseOutput = (Invoke-Jvman use a) -join "`n"
+        $env:JAVA_HOME = $jdkB
+        $env:Path = (Join-Path $jdkB 'bin') + ';' +
+                    (Join-Path $stateRoot 'current\bin') + ';' + $env:Path
+        $competingUseOutput = (Invoke-Jvman use a) -join "`n"
+        if ($competingUseOutput -notmatch 'jvman init') {
+            throw 'use accepted a version-specific Java path instead of stable current\\bin'
+        }
+        Invoke-Expression ((Invoke-Jvman init powershell) -join "`n")
+        $expectedStableHome = Join-Path ((Invoke-Jvman home).Trim()) 'current'
+        if ($env:JAVA_HOME -ne $expectedStableHome) {
+            throw "PowerShell init set JAVA_HOME to '$env:JAVA_HOME'; expected '$expectedStableHome'"
+        }
+        $firstPathEntry = @($env:Path -split ';' | Where-Object { $_ })[0]
+        if (-not [string]::Equals(
+                [IO.Path]::GetFullPath($firstPathEntry),
+                [IO.Path]::GetFullPath((Join-Path $expectedStableHome 'bin')),
+                [StringComparison]::OrdinalIgnoreCase)) {
+            throw "PowerShell init did not prioritize current\\bin: $env:Path"
+        }
+        $initializedUseOutput = (Invoke-Jvman use b) -join "`n"
         if ($initializedUseOutput -match 'jvman init') {
             throw "use printed an initialization hint for an initialized shell:`n$initializedUseOutput"
         }
+        if ($env:JAVA_HOME -ne $expectedStableHome -or
+            -not (Test-Path -LiteralPath (Join-Path $expectedStableHome 'b.marker'))) {
+            throw 'an initialized PowerShell did not follow a switch from another jvman process'
+        }
+        $healthyDoctorOutput = (Invoke-Jvman doctor) -join "`n"
+        if ($healthyDoctorOutput -notmatch 'No problems found') {
+            throw "doctor rejected a correctly initialized shell:`n$healthyDoctorOutput"
+        }
+        Invoke-Jvman use a | Out-Null
     }
     finally {
         $env:Path = $pathBeforeInitializedUse
+        $env:JAVA_HOME = $javaHomeBeforeInitializedUse
     }
     $registeredA = (Invoke-Jvman which a).Trim()
     $childHome = (& $binaryPath exec a -- cmd.exe /d /c 'echo %JAVA_HOME%').Trim()

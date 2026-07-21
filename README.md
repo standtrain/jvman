@@ -89,13 +89,14 @@ preference afterward.
 
 When started without switches, the installer asks whether to enable `PATH`
 integration, whether it should apply to only the current user or all users,
-whether a valid `current` JDK should provide `JAVA_HOME`, and whether to run
+whether `JAVA_HOME` should point to the stable `current` path, and whether to run
 `jvman discover --register`. Current-user PATH integration adds both the
 program directory and the stable `<data-home>\current\bin` directory. The
 stable Java entry is added even before a JDK is selected; later `jvman use`
 commands redirect `current` without another PATH update. All-users installs
-add only the protected program directory to the machine PATH. Existing entries
-are retained and exact or canonical duplicates are not added.
+add only the protected program directory to the machine PATH. Newly owned PATH
+entries are prepended so they win over older user-level Java entries. Existing
+entries are retained and exact or canonical duplicates are not added.
 
 The normal command-line switches are:
 
@@ -123,27 +124,40 @@ When upgrading an older current-user install that owned a machine PATH entry,
 setup elevates only a narrow cleanup helper and then updates the original
 user's metadata without running the user install under an administrator
 profile.
-`/CONFIGURE_JAVA` is opt-in, configures current-user `JAVA_HOME`, and requires
-`<data-home>\current\bin\java.exe` and `javac.exe`; without
-`/REPLACE_JAVA_HOME`, a different existing `JAVA_HOME` is treated as a conflict
-and is left unchanged. `/DISCOVER` runs discovery only after installation and
-does not select a current JDK.
+`/CONFIGURE_JAVA` is opt-in and configures current-user `JAVA_HOME` to the
+stable `<data-home>\current` path. The path may not exist until the first
+successful `jvman use`. Without `/REPLACE_JAVA_HOME`, a different existing
+`JAVA_HOME` is treated as a conflict and is left unchanged. `/DISCOVER` runs
+discovery only after installation and does not select a current JDK.
 
 `/NO_CONFIGURE_JAVA` disables `JAVA_HOME` configuration; on a repeat install it
 restores any `JAVA_HOME` value previously managed by this installer. It does
 not override the separate PATH choice.
 
-Terminals that were already running before installation keep their old process
-environment. Open a new terminal, or initialize the existing one with the
-command for that shell:
+An executable cannot modify the environment of its parent shell. Terminals
+that were already running before installation, including new tabs owned by an
+already-running Windows Terminal process, therefore keep their old environment.
+Exit the terminal application completely and reopen it to receive persisted
+values. If a machine PATH Java still takes precedence, or to initialize the
+existing shell, run the matching command once:
 
 ```cmd
-for /f "delims=" %L in ('jvman init cmd') do @call %L
+for /f "delims=" %L in ('jvman init cmd') do @%L
 ```
 
 ```powershell
 jvman init powershell | Invoke-Expression
 ```
+
+Put that initialization in the shell startup configuration when every new
+terminal should be ready automatically. For PowerShell, add it to
+`$PROFILE.CurrentUserAllHosts`. For CMD, configure a trusted per-user AutoRun
+script using `for /f "delims=" %%L in ('jvman init cmd') do @%%L`; batch files
+require doubled percent signs. Preserve any existing AutoRun command instead
+of overwriting it. Do not enable a user-writable Java AutoRun hook in shells
+that are routinely started elevated. User PATH cannot safely override a
+machine PATH Java in every Windows process, so the startup initialization is
+the reliable option for that conflict.
 
 For unattended provisioning, combine the desired switches with `/S`; a
 non-silent run presents the same choices in the graphical prompts.
@@ -202,8 +216,8 @@ java -version
 jvman current
 ```
 
-Add the following line to the PowerShell profile once if every new shell should
-use the selected JDK:
+Add the following line to `$PROFILE.CurrentUserAllHosts` once if every new
+PowerShell should use the selected JDK:
 
 ```powershell
 jvman init powershell | Invoke-Expression
@@ -211,7 +225,9 @@ jvman init powershell | Invoke-Expression
 
 `JAVA_HOME` points to `<data-home>\current`, not a version-specific directory.
 After this one-time shell initialization, `jvman use <name>` redirects the
-junction and the next Java process sees the new JDK immediately.
+junction and the next Java process in every initialized terminal sees the new
+JDK immediately. Existing Java, Maven, and Gradle daemon processes must be
+restarted because their environments cannot change in place.
 
 ## Commands
 

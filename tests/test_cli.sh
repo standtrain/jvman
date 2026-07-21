@@ -254,13 +254,27 @@ use_output=$("$binary" use a)
 printf '%s\n' "$use_output" | grep -F 'jvman init' >/dev/null
 test "$("$binary" current)" = a
 test -f "$state_root/current/bin/java"
-initialized_use_output=$(PATH="$state_root/current/bin:$PATH" "$binary" use a)
+JAVA_HOME=$test_root/fixtures/jdk-b
+PATH="$test_root/fixtures/jdk-b/bin:$state_root/current/bin:$PATH"
+export JAVA_HOME PATH
+eval "$("$binary" init sh)"
+test "$JAVA_HOME" = "$state_root/current"
+case $PATH in
+    "$state_root/current/bin":*) ;;
+    *)
+        echo 'sh initialization did not prioritize current/bin' >&2
+        exit 1
+        ;;
+esac
+initialized_use_output=$("$binary" use b)
 case $initialized_use_output in
     *'jvman init'*)
         echo 'use printed an initialization hint for an initialized shell' >&2
         exit 1
         ;;
 esac
+test -f "$JAVA_HOME/b.marker"
+"$binary" use a >/dev/null
 "$binary" exec a -- sh -c 'test "$JAVA_HOME" = "$1"' sh "$test_root/fixtures/jdk-a"
 "$binary" use b
 "$binary" remove a

@@ -62,7 +62,7 @@ mingw32-make.exe
 默认选中“跟随系统”，并根据 Windows 界面语言决定实际界面；也可显式选择
 English 或简体中文。取消语言选择会直接退出安装程序。安装成功后，确认的语言会同时写入安装记录和发起安装的 Windows 用户 CLI 偏好。`JVMAN_LANG` 仍可覆盖当前进程，之后也可用 `jvman language` 修改已保存偏好。
 
-不带参数启动时，安装器会依次询问是否启用 `PATH` 集成、PATH 项写入“仅当前用户”还是“所有用户”、是否用有效的 `current` JDK 配置 `JAVA_HOME`，以及是否在安装后执行 `jvman discover --register`。当前用户 PATH 集成会同时加入程序目录和稳定的 `<数据目录>\current\bin`；即使尚未选择 JDK，也会预先加入该稳定路径，后续 `jvman use` 只需重定向 `current`。所有用户安装仅把受保护的程序目录加入系统 PATH。已有 PATH 项会保留，精确或规范化后的重复项不会再次加入。
+不带参数启动时，安装器会依次询问是否启用 `PATH` 集成、PATH 项写入“仅当前用户”还是“所有用户”、是否让 `JAVA_HOME` 指向稳定的 `current` 路径，以及是否在安装后执行 `jvman discover --register`。当前用户 PATH 集成会同时加入程序目录和稳定的 `<数据目录>\current\bin`；即使尚未选择 JDK，也会预先加入该稳定路径，后续 `jvman use` 只需重定向 `current`。所有用户安装仅把受保护的程序目录加入系统 PATH。安装器新拥有的 PATH 项会前置，以便优先于旧的用户级 Java；已有 PATH 项会保留，精确或规范化后的重复项不会再次加入。
 
 常用命令行参数：
 
@@ -76,19 +76,21 @@ jvman-setup.exe /UNINSTALL /MACHINE [/S]
 jvman-setup.exe /HELP
 ```
 
-`/S`、`/SILENT` 和 `/QUIET` 表示静默安装。`/LANG=en` 与 `/LANG=zh-CN` 可跳过下拉框并指定安装器及安装后 CLI 的语言。`/ADD_TO_PATH` 显式开启 `PATH` 集成。`/USER_PATH` 把程序目录和稳定的 `<数据目录>\current\bin` 写入当前用户环境，并且是默认值；`/SYSTEM_PATH`（也可用 `/MACHINE_PATH` 或 `/ALL_USERS_PATH`）会把程序安装到受保护的 Program Files、把状态写入 HKLM、加入系统 PATH，并按需请求 UAC。机器模式不会把用户可写的 JDK 目录加入系统 PATH。`/NO_PATH`（或 `/NO_ADD_TO_PATH`）关闭 PATH 更新；重复安装时还会删除此前由本安装器拥有的程序和 Java PATH 项。升级旧版“当前用户安装 + 系统 PATH”状态时，只会提权一个窄范围清理进程来移除已认证的旧系统 PATH 项，随后由原用户进程更新 HKCU，不会把整个用户安装流程放到管理员账户下执行。`/CONFIGURE_JAVA` 只配置当前用户 `JAVA_HOME`，并要求 `<数据目录>\current\bin\java.exe` 与 `javac.exe` 均存在；如果已有不同的 `JAVA_HOME`，没有 `/REPLACE_JAVA_HOME` 时会报告冲突并保持原值。`/DISCOVER` 只在当前用户安装完成后执行发现，不会自动选择当前 JDK。
+`/S`、`/SILENT` 和 `/QUIET` 表示静默安装。`/LANG=en` 与 `/LANG=zh-CN` 可跳过下拉框并指定安装器及安装后 CLI 的语言。`/ADD_TO_PATH` 显式开启 `PATH` 集成。`/USER_PATH` 把程序目录和稳定的 `<数据目录>\current\bin` 写入当前用户环境，并且是默认值；`/SYSTEM_PATH`（也可用 `/MACHINE_PATH` 或 `/ALL_USERS_PATH`）会把程序安装到受保护的 Program Files、把状态写入 HKLM、加入系统 PATH，并按需请求 UAC。机器模式不会把用户可写的 JDK 目录加入系统 PATH。`/NO_PATH`（或 `/NO_ADD_TO_PATH`）关闭 PATH 更新；重复安装时还会删除此前由本安装器拥有的程序和 Java PATH 项。升级旧版“当前用户安装 + 系统 PATH”状态时，只会提权一个窄范围清理进程来移除已认证的旧系统 PATH 项，随后由原用户进程更新 HKCU，不会把整个用户安装流程放到管理员账户下执行。`/CONFIGURE_JAVA` 把当前用户 `JAVA_HOME` 配置为稳定的 `<数据目录>\current`；该路径可以在首次成功执行 `jvman use` 后才存在。如果已有不同的 `JAVA_HOME`，没有 `/REPLACE_JAVA_HOME` 时会报告冲突并保持原值。`/DISCOVER` 只在当前用户安装完成后执行发现，不会自动选择当前 JDK。
 
 `/NO_CONFIGURE_JAVA` 会关闭 `JAVA_HOME` 配置；重复安装时，如果该变量曾由本安装器管理，会恢复原先的值。它不会覆盖单独作出的 PATH 选择。
 
-安装前已经打开的终端会保留旧的进程环境。请重新打开终端，或在现有终端执行对应命令：
+可执行文件无法修改父 shell 的环境。安装前已经打开的终端会保留旧的进程环境；已经运行的 Windows Terminal 所创建的新标签页也可能继续继承旧环境。完整退出终端程序后重新打开可接收持久环境；如果系统 PATH 中的旧 Java 仍然靠前，或需要初始化现有终端，请执行一次对应命令：
 
 ```cmd
-for /f "delims=" %L in ('jvman init cmd') do @call %L
+for /f "delims=" %L in ('jvman init cmd') do @%L
 ```
 
 ```powershell
 jvman init powershell | Invoke-Expression
 ```
+
+希望后续终端自动生效时，应把对应初始化放入 shell 启动配置。PowerShell 可加入 `$PROFILE.CurrentUserAllHosts`；CMD 的受信任当前用户 AutoRun 脚本应写成 `for /f "delims=" %%L in ('jvman init cmd') do @%%L`，因为批处理文件中的百分号必须成对书写。必须保留已有 AutoRun 内容，不能直接覆盖。经常以管理员身份启动的 shell 不应自动加载用户可写的 Java 路径。用户 PATH 无法在所有 Windows 进程中安全压过系统 PATH 中的 Java，因此存在该冲突时，shell 启动初始化才是可靠方案。
 
 无人值守部署时，请将需要的参数与 `/S` 组合使用；不带 `/S` 时会显示相同选项的图形确认对话框。
 
@@ -129,13 +131,13 @@ java -version
 jvman current
 ```
 
-希望每个新 PowerShell 会话自动生效时，可把下面一行加入 PowerShell profile：
+希望每个新 PowerShell 会话自动生效时，可把下面一行加入 `$PROFILE.CurrentUserAllHosts`：
 
 ```powershell
 jvman init powershell | Invoke-Expression
 ```
 
-初始化后，`JAVA_HOME` 始终指向 `<数据目录>\current`，`PATH` 始终包含 `current\bin`。后续执行 `jvman use <名称>` 只会重定向 junction，因此已经初始化过的终端不需要重复修改环境变量；下一次启动的 Java 进程会直接使用新版本。
+初始化后，`JAVA_HOME` 始终指向 `<数据目录>\current`，`PATH` 始终包含 `current\bin`。后续执行 `jvman use <名称>` 只会重定向 junction，因此所有已经初始化过的终端都不需要重复修改环境变量；下一次启动的 Java 进程会直接使用新版本。已经运行的 Java、Maven 或 Gradle 守护进程仍需重启，因为其进程环境不能原地更新。
 
 ## 命令
 

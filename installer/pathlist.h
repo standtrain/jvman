@@ -28,13 +28,19 @@ JvmanPathListStatus jvman_pathlist_contains(const wchar_t *path_value,
                                             int *contains_out);
 
 /*
- * add/remove always return a malloc-allocated string in result_out on success;
- * the caller owns it and must release it with free().
+ * add prepends a missing target so installer-owned tools take precedence;
+ * remove deletes every matching item. Both return a malloc-allocated string
+ * in result_out on success; the caller owns it and must release it with free().
  */
 JvmanPathListStatus jvman_pathlist_add(const wchar_t *path_value,
                                        const wchar_t *target,
                                        wchar_t **result_out,
                                        int *changed_out);
+/* Move every matching target to one normalized entry at the front. */
+JvmanPathListStatus jvman_pathlist_prepend(const wchar_t *path_value,
+                                           const wchar_t *target,
+                                           wchar_t **result_out,
+                                           int *changed_out);
 JvmanPathListStatus jvman_pathlist_remove(const wchar_t *path_value,
                                           const wchar_t *target,
                                           wchar_t **result_out,

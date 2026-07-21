@@ -93,6 +93,23 @@ function Assert-PathContains(
     throw "$Message (missing '$Expected')"
 }
 
+function Assert-PathStartsWith(
+    [AllowNull()][string]$PathValue,
+    [string]$Expected,
+    [string]$Message
+) {
+    $expectedPath = [IO.Path]::GetFullPath($Expected).TrimEnd([char[]]@('\\', '/'))
+    $first = @($PathValue -split ';' | Where-Object { $_ })[0]
+    if ($null -eq $first) { throw "$Message (PATH is empty)" }
+    $candidate = [Environment]::ExpandEnvironmentVariables(
+        $first.Trim().Trim('"'))
+    $candidate = [IO.Path]::GetFullPath($candidate).TrimEnd([char[]]@('\\', '/'))
+    if (-not [string]::Equals($candidate, $expectedPath,
+                             [StringComparison]::OrdinalIgnoreCase)) {
+        throw "$Message (expected '$Expected', got '$first')"
+    }
+}
+
 function Assert-UserUninstallCompleted([string]$InstallDir) {
     $uninstaller = Join-Path $InstallDir 'uninstall.exe'
     $executable = Join-Path $InstallDir 'jvman.exe'
@@ -272,7 +289,11 @@ try {
         Set-PreferenceLanguage 'en'
         [Environment]::SetEnvironmentVariable('JVMAN_HOME', $regularDataDir, 'Process')
         try {
-            $regularArguments = @('/S', '/LANG=zh-CN', '/ADD_TO_PATH', '/USER_PATH', "/DIR=`"$regularInstallDir`"")
+            $regularArguments = @(
+                '/S', '/LANG=zh-CN', '/ADD_TO_PATH', '/USER_PATH',
+                '/CONFIGURE_JAVA', '/REPLACE_JAVA_HOME',
+                "/DIR=`"$regularInstallDir`""
+            )
             Assert-Equal 0 (Invoke-GuiProcess $setupPath $regularArguments) 'Regular install failed'
             if (-not (Test-Path -LiteralPath $regularUninstaller -PathType Leaf)) {
                 throw "Regular install did not create $regularUninstaller"
@@ -291,8 +312,117 @@ try {
             $stableJavaBin = Join-Path $regularDataDir 'current\bin'
             Assert-PathContains $installedUserPath $regularInstallDir 'Regular install did not add its program directory to user PATH'
             Assert-PathContains $installedUserPath $stableJavaBin 'Regular install did not add current\bin to user PATH'
+            Assert-PathStartsWith $installedUserPath $stableJavaBin 'Regular install did not prioritize current\bin in user PATH'
+            Assert-Equal $currentLink (
+                [Environment]::GetEnvironmentVariable('JAVA_HOME', 'User')
+            ) 'Regular install did not configure stable JAVA_HOME before the first use'
             if (Test-Path -LiteralPath $stableJavaBin) {
                 throw 'Regular install unexpectedly required an existing current JDK'
+            }
+
+            $reorderedUserPath = (@(
+                $installedUserPath -split ';' |
+                    Where-Object { $_ -and $_ -ine $stableJavaBin }
+            ) + @($stableJavaBin)) -join ';'
+            [Environment]::SetEnvironmentVariable(
+                'Path', $reorderedUserPath, 'User')
+            Assert-Equal 0 (
+                Invoke-GuiProcess $setupPath $regularArguments
+            ) 'Upgrade did not migrate an owned current\\bin PATH entry'
+            Assert-PathStartsWith (
+                [Environment]::GetEnvironmentVariable('Path', 'User')
+            ) $stableJavaBin 'Upgrade left its owned current\\bin behind an older Java entry'
+
+            $userEnvironmentKey = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey(
+                'Environment', $true)
+            if (-not $userEnvironmentKey) {
+                throw 'Could not open the user environment registry key'
+            }
+            try {
+                $prioritizedUserPath = [string]$userEnvironmentKey.GetValue(
+                    'Path', $null,
+                    [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+                if (-not ($userEnvironmentKey.GetValueNames() -contains 'JAVA_HOME')) {
+                    throw 'Managed JAVA_HOME is missing before the rollback test'
+                }
+                $managedJavaHome = [string]$userEnvironmentKey.GetValue(
+                    'JAVA_HOME', $null,
+                    [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+                $managedJavaHomeKind = $userEnvironmentKey.GetValueKind('JAVA_HOME')
+                $rollbackPath = (@(
+                    $prioritizedUserPath -split ';' |
+                        Where-Object { $_ -ine $regularInstallDir }
+                ) + @($regularInstallDir)) -join ';'
+                $userEnvironmentKey.SetValue(
+                    'Path', $rollbackPath,
+                    [Microsoft.Win32.RegistryValueKind]::ExpandString)
+            }
+            finally {
+                $userEnvironmentKey.Dispose()
+            }
+            $conflictingJavaHome = Join-Path $root 'foreign-java-home'
+            $failedUpgradeArguments = @(
+                '/S', '/LANG=zh-CN', '/ADD_TO_PATH', '/USER_PATH',
+                '/CONFIGURE_JAVA',
+                "/DIR=`"$regularInstallDir`""
+            )
+            try {
+                $userEnvironmentKey = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey(
+                    'Environment', $true)
+                if (-not $userEnvironmentKey) {
+                    throw 'Could not write the conflicting JAVA_HOME value'
+                }
+                try {
+                    $userEnvironmentKey.SetValue(
+                        'JAVA_HOME', $conflictingJavaHome, $managedJavaHomeKind)
+                }
+                finally {
+                    $userEnvironmentKey.Dispose()
+                }
+                Assert-Equal 1 (
+                    Invoke-GuiProcess $setupPath $failedUpgradeArguments
+                ) 'Upgrade with a conflicting JAVA_HOME returned an unexpected exit code'
+                $userEnvironmentKey = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey(
+                    'Environment', $false)
+                if (-not $userEnvironmentKey) {
+                    throw 'Failed upgrade removed the user environment registry key'
+                }
+                try {
+                    $restoredPath = [string]$userEnvironmentKey.GetValue(
+                        'Path', $null,
+                        [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+                    if (-not [string]::Equals(
+                            $rollbackPath, $restoredPath,
+                            [StringComparison]::Ordinal)) {
+                        throw 'Failed upgrade did not exactly restore user PATH'
+                    }
+                    Assert-Equal ([Microsoft.Win32.RegistryValueKind]::ExpandString) (
+                        $userEnvironmentKey.GetValueKind('Path')
+                    ) 'Failed upgrade did not restore the user PATH registry type'
+                    $restoredJavaHome = [string]$userEnvironmentKey.GetValue(
+                        'JAVA_HOME', $null,
+                        [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+                    if (-not [string]::Equals(
+                            $conflictingJavaHome, $restoredJavaHome,
+                            [StringComparison]::Ordinal)) {
+                        throw 'Failed upgrade changed the conflicting JAVA_HOME value'
+                    }
+                }
+                finally {
+                    $userEnvironmentKey.Dispose()
+                }
+            }
+            finally {
+                $userEnvironmentKey = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey(
+                    'Environment',
+                    [Microsoft.Win32.RegistryKeyPermissionCheck]::ReadWriteSubTree)
+                try {
+                    $userEnvironmentKey.SetValue(
+                        'JAVA_HOME', $managedJavaHome, $managedJavaHomeKind)
+                }
+                finally {
+                    $userEnvironmentKey.Dispose()
+                }
             }
 
             New-Item -ItemType Directory -Path $managedJdkDir -Force | Out-Null
@@ -310,6 +440,7 @@ try {
             Assert-Equal 0 (Invoke-GuiProcess $regularUninstaller @('/S')) 'Installed uninstaller did not infer uninstall mode'
             Assert-UserUninstallCompleted $regularInstallDir
             Assert-Equal $beforePath ([Environment]::GetEnvironmentVariable('Path', 'User')) 'Program-only uninstall did not restore user PATH'
+            Assert-Equal $beforeJavaHome ([Environment]::GetEnvironmentVariable('JAVA_HOME', 'User')) 'Program-only uninstall did not restore user JAVA_HOME'
             if (-not (Test-Path -LiteralPath $managedSentinel -PathType Leaf) -or
                 -not (Test-Path -LiteralPath (Join-Path $regularDataDir 'cache\download.tmp') -PathType Leaf) -or
                 -not (Test-Path -LiteralPath $currentLink)) {
@@ -322,6 +453,7 @@ try {
             ) 'Data-preserving-JDK uninstall failed'
             Assert-UserUninstallCompleted $regularInstallDir
             Assert-Equal $beforePath ([Environment]::GetEnvironmentVariable('Path', 'User')) 'Data removal did not restore user PATH'
+            Assert-Equal $beforeJavaHome ([Environment]::GetEnvironmentVariable('JAVA_HOME', 'User')) 'Data removal did not restore user JAVA_HOME'
             if (-not (Test-Path -LiteralPath $managedSentinel -PathType Leaf)) {
                 throw 'Data removal deleted a managed JDK without /REMOVE_JDKS'
             }
@@ -343,6 +475,7 @@ try {
             ) 'Full data and managed JDK uninstall failed'
             Assert-UserUninstallCompleted $regularInstallDir
             Assert-Equal $beforePath ([Environment]::GetEnvironmentVariable('Path', 'User')) 'Full uninstall did not restore user PATH'
+            Assert-Equal $beforeJavaHome ([Environment]::GetEnvironmentVariable('JAVA_HOME', 'User')) 'Full uninstall did not restore user JAVA_HOME'
             if (Test-Path -LiteralPath $regularDataDir) {
                 throw 'Full uninstall left the jvman data directory'
             }

@@ -253,11 +253,35 @@ static int switch_to_registration(const JvmanContext *context,
     return 0;
 }
 
+static int shell_path_starts_with(const char *directory) {
+    const char *path = getenv("PATH");
+    const char *first_end;
+    size_t first_length;
+    char first[JVMAN_PATH_MAX];
+    if (!directory || !path || !*path) return 0;
+#if defined(_WIN32)
+    first_end = strchr(path, ';');
+#else
+    first_end = strchr(path, ':');
+#endif
+    first_length = first_end ? (size_t)(first_end - path) : strlen(path);
+    if (first_length == 0 || first_length >= sizeof(first)) return 0;
+    memcpy(first, path, first_length);
+    first[first_length] = '\0';
+    return jvman_path_equal(first, directory);
+}
+
 static int shell_resolves_selected_java(const JvmanContext *context) {
+    char current_bin[JVMAN_PATH_MAX];
     char expected[JVMAN_PATH_MAX];
     char expected_canonical[JVMAN_PATH_MAX];
     char actual[JVMAN_PATH_MAX];
-    if (!context ||
+    const char *java_home = getenv("JAVA_HOME");
+    if (!context || !java_home ||
+        !jvman_path_equal(java_home, context->current_link) ||
+        jvman_path_join(current_bin, sizeof(current_bin), context->current_link,
+                        "bin") != 0 ||
+        !shell_path_starts_with(current_bin) ||
         jvman_path_join3(expected, sizeof(expected), context->current_link,
                          "bin", JVMAN_JAVA_EXE) != 0 ||
         platform_absolute_path(expected, expected_canonical,
@@ -271,13 +295,14 @@ static int shell_resolves_selected_java(const JvmanContext *context) {
 static void print_shell_initialization_hint(const JvmanContext *context) {
     if (shell_resolves_selected_java(context)) return;
 #if defined(_WIN32)
-    printf("The selected Java is not active in this shell yet. Initialize it with one of:\n");
-    printf("  CMD: for /f \"delims=\" %%L in ('jvman init cmd') do @call %%L\n");
+    printf("The selected Java is not active in this shell. A child process cannot update its parent shell. Initialize this shell once with one of:\n");
+    printf("  CMD: for /f \"delims=\" %%L in ('jvman init cmd') do @%%L\n");
     printf("  PowerShell: jvman init powershell | Invoke-Expression\n");
 #else
-    printf("The selected Java is not active in this shell yet. Initialize it with:\n");
+    printf("The selected Java is not active in this shell. A child process cannot update its parent shell. Initialize this shell once with:\n");
     printf("  sh: eval \"$(jvman init sh)\"\n");
 #endif
+    printf("Add the same initialization to your shell startup file for future terminals.\n");
 }
 
 static int command_use(const JvmanContext *context, const char *name) {
@@ -837,6 +862,53 @@ static int command_exec(const JvmanContext *context, const char *name, char **co
     return result;
 }
 
+static int command_init_cmd(const JvmanContext *context) {
+    const char *path = getenv("PATH");
+    const char *updated_path;
+    char current_bin[JVMAN_PATH_MAX];
+    char *allocated = NULL;
+    size_t current_length;
+    size_t path_length = path ? strlen(path) : 0;
+    size_t updated_length;
+    if (!context ||
+        jvman_path_join(current_bin, sizeof(current_bin), context->current_link,
+                        "bin") != 0 ||
+        strpbrk(context->current_link, "%!\"\r\n") != NULL ||
+        (path && strpbrk(path, "%!\"\r\n") != NULL)) {
+        return print_error(
+            "the current shell environment cannot be activated safely in CMD");
+    }
+    current_length = strlen(current_bin);
+    if (path && *path && shell_path_starts_with(current_bin)) {
+        updated_path = path;
+        updated_length = path_length;
+    } else {
+        if (current_length > (size_t)-1 - path_length - 2u) {
+            return print_error("the current shell PATH is too long for CMD");
+        }
+        updated_length = current_length + (path_length ? path_length + 1u : 0u);
+        allocated = (char *)malloc(updated_length + 1u);
+        if (!allocated) return print_error("out of memory");
+        memcpy(allocated, current_bin, current_length);
+        if (path_length) {
+            allocated[current_length] = ';';
+            memcpy(allocated + current_length + 1u, path, path_length);
+        }
+        allocated[updated_length] = '\0';
+        updated_path = allocated;
+    }
+    if (strlen(context->current_link) + sizeof("set \"JAVA_HOME=\"") + 1u >
+            8191u ||
+        updated_length + sizeof("set \"PATH=\"") + 1u > 8191u) {
+        free(allocated);
+        return print_error("the current shell PATH is too long for CMD");
+    }
+    printf("set \"JAVA_HOME=%s\"\n", context->current_link);
+    printf("set \"PATH=%s\"\n", updated_path);
+    free(allocated);
+    return 0;
+}
+
 static int command_init(const JvmanContext *context, const char *shell) {
     char quoted[JVMAN_PATH_MAX * 4 + 3];
     if (!shell || !*shell) {
@@ -850,21 +922,20 @@ static int command_init(const JvmanContext *context, const char *shell) {
         jvman_shell_quote_powershell(context->current_link, quoted, sizeof(quoted));
         printf("$env:JAVA_HOME = %s\n", quoted);
         puts("$jvmanJavaBin = Join-Path $env:JAVA_HOME 'bin'");
-        puts("$jvmanPathParts = @($env:Path -split ';' | Where-Object { $_ -and $_ -ne $jvmanJavaBin })");
-        puts("$env:Path = (@($jvmanJavaBin) + $jvmanPathParts) -join ';'");
-        puts("Remove-Variable jvmanJavaBin,jvmanPathParts -ErrorAction SilentlyContinue");
+        puts("$jvmanPathSeparator = [IO.Path]::PathSeparator");
+        puts("$jvmanPathParts = @($env:Path -split [regex]::Escape([string]$jvmanPathSeparator) | Where-Object { $_ -and $_ -ne $jvmanJavaBin })");
+        puts("$env:Path = (@($jvmanJavaBin) + $jvmanPathParts) -join $jvmanPathSeparator");
+        puts("Remove-Variable jvmanJavaBin,jvmanPathSeparator,jvmanPathParts -ErrorAction SilentlyContinue");
         return 0;
     }
     if (strcmp(shell, "cmd") == 0) {
-        printf("set \"JAVA_HOME=%s\"\n", context->current_link);
-        puts("set \"PATH=%JAVA_HOME%\\bin;%PATH%\"");
-        return 0;
+        return command_init_cmd(context);
     }
     if (strcmp(shell, "sh") == 0 || strcmp(shell, "bash") == 0 ||
         strcmp(shell, "zsh") == 0) {
         jvman_shell_quote_sh(context->current_link, quoted, sizeof(quoted));
         printf("export JAVA_HOME=%s\n", quoted);
-        puts("if [ -n \"${PATH:-}\" ]; then case \":$PATH:\" in *\":$JAVA_HOME/bin:\"*) ;; *) export PATH=\"$JAVA_HOME/bin:$PATH\" ;; esac; else export PATH=\"$JAVA_HOME/bin\"; fi");
+        puts("if [ -n \"${PATH:-}\" ]; then case \"$PATH\" in \"$JAVA_HOME/bin\"|\"$JAVA_HOME/bin:\"*) ;; *) export PATH=\"$JAVA_HOME/bin:$PATH\" ;; esac; else export PATH=\"$JAVA_HOME/bin\"; fi");
         return 0;
     }
     return print_error("unsupported shell; use powershell, cmd, or sh");
@@ -873,7 +944,9 @@ static int command_init(const JvmanContext *context, const char *shell) {
 static int command_doctor(const JvmanContext *context) {
     int warnings = 0;
     char active[JVMAN_NAME_MAX + 1] = {0};
+    char expected_bin[JVMAN_PATH_MAX];
     char expected_java[JVMAN_PATH_MAX];
+    char expected_java_canonical[JVMAN_PATH_MAX];
     char actual_java[JVMAN_PATH_MAX];
     const char *java_home = getenv("JAVA_HOME");
     printf("[ok]   data home: %s\n", context->root);
@@ -906,10 +979,15 @@ static int command_doctor(const JvmanContext *context) {
                context->current_link);
         ++warnings;
     }
-    if (jvman_path_join3(expected_java, sizeof(expected_java), context->current_link,
-                         "bin", JVMAN_JAVA_EXE) == 0 &&
+    if (jvman_path_join(expected_bin, sizeof(expected_bin), context->current_link,
+                        "bin") == 0 &&
+        jvman_path_join(expected_java, sizeof(expected_java), expected_bin,
+                        JVMAN_JAVA_EXE) == 0 &&
+        platform_absolute_path(expected_java, expected_java_canonical,
+                               sizeof(expected_java_canonical)) == 0 &&
         platform_find_executable(JVMAN_JAVA_EXE, actual_java, sizeof(actual_java)) == 0) {
-        if (jvman_path_equal(actual_java, expected_java)) {
+        if (shell_path_starts_with(expected_bin) &&
+            jvman_path_equal(actual_java, expected_java_canonical)) {
             printf("[ok]   PATH resolves java through jvman\n");
         } else {
             printf("[warn] PATH resolves java to %s\n", actual_java);

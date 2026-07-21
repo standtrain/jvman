@@ -57,6 +57,7 @@ static int valid_environment_scope(uint32_t scope) {
 typedef struct JvmanRegistryString {
     int present;
     DWORD type;
+    DWORD byte_count;
     wchar_t *value;
 } JvmanRegistryString;
 
@@ -64,6 +65,7 @@ static void registry_string_init(JvmanRegistryString *value) {
     if (!value) return;
     value->present = 0;
     value->type = 0;
+    value->byte_count = 0;
     value->value = NULL;
 }
 
@@ -178,7 +180,6 @@ static JvmanEnvironmentStatus query_registry_string(
     size_t wchar_count;
     size_t index;
     wchar_t *buffer = NULL;
-    JvmanEnvironmentStatus status;
     LSTATUS result;
 
     if (!key || !name || !out || maximum == 0u) {
@@ -206,6 +207,10 @@ static JvmanEnvironmentStatus query_registry_string(
         free(buffer);
         return map_registry_status(result);
     }
+    if (!registry_string_type(type)) {
+        free(buffer);
+        return JVMAN_ENV_UNSUPPORTED_TYPE;
+    }
     if ((actual_count % sizeof(wchar_t)) != 0u ||
         (size_t)actual_count > maximum * sizeof(wchar_t)) {
         free(buffer);
@@ -228,11 +233,10 @@ static JvmanEnvironmentStatus query_registry_string(
             return JVMAN_ENV_METADATA_INVALID;
         }
     }
-    status = duplicate_bounded(buffer, maximum, &out->value);
-    free(buffer);
-    if (status != JVMAN_ENV_OK) return status;
     out->present = 1;
     out->type = type;
+    out->byte_count = actual_count;
+    out->value = buffer;
     return JVMAN_ENV_OK;
 }
 
@@ -682,7 +686,87 @@ void jvman_installer_metadata_free(JvmanInstallerMetadata *metadata) {
     jvman_installer_metadata_init(metadata);
 }
 
+void jvman_environment_path_snapshot_init(
+    JvmanEnvironmentPathSnapshot *snapshot) {
+    if (!snapshot) return;
+    memset(snapshot, 0, sizeof(*snapshot));
+}
+
+void jvman_environment_path_snapshot_free(
+    JvmanEnvironmentPathSnapshot *snapshot) {
+    if (!snapshot) return;
+    free(snapshot->value);
+    jvman_environment_path_snapshot_init(snapshot);
+}
+
+void jvman_environment_value_snapshot_init(
+    JvmanEnvironmentValueSnapshot *snapshot) {
+    jvman_environment_path_snapshot_init(snapshot);
+}
+
+void jvman_environment_value_snapshot_free(
+    JvmanEnvironmentValueSnapshot *snapshot) {
+    jvman_environment_path_snapshot_free(snapshot);
+}
+
 #if defined(_WIN32)
+
+static int environment_path_snapshot_valid(
+    const JvmanEnvironmentPathSnapshot *snapshot) {
+    size_t wchar_count;
+    size_t index;
+    if (!snapshot || !snapshot->valid) return 0;
+    if (!snapshot->present) {
+        return snapshot->type == 0u && snapshot->byte_count == 0u &&
+               snapshot->value == NULL;
+    }
+    if (!valid_environment_type(snapshot->type) || !snapshot->value ||
+        snapshot->byte_count == 0u ||
+        snapshot->byte_count % sizeof(wchar_t) != 0u ||
+        (size_t)snapshot->byte_count >
+            JVMAN_ENV_VALUE_MAX_CHARS * sizeof(wchar_t)) {
+        return 0;
+    }
+    wchar_count = (size_t)snapshot->byte_count / sizeof(wchar_t);
+    for (index = 0u; index < wchar_count; ++index) {
+        if (snapshot->value[index] == L'\0') break;
+    }
+    if (index == wchar_count) return 0;
+    for (++index; index < wchar_count; ++index) {
+        if (snapshot->value[index] != L'\0') return 0;
+    }
+    return 1;
+}
+
+static int registry_string_matches_path_snapshot(
+    const JvmanRegistryString *current,
+    const JvmanEnvironmentPathSnapshot *snapshot) {
+    if (!current || !environment_path_snapshot_valid(snapshot) ||
+        current->present != snapshot->present) {
+        return 0;
+    }
+    if (!current->present) return 1;
+    return current->type == (DWORD)snapshot->type &&
+           current->byte_count == (DWORD)snapshot->byte_count &&
+           current->value != NULL &&
+           memcmp(current->value, snapshot->value,
+                  snapshot->byte_count) == 0;
+}
+
+static void environment_path_snapshot_take_written(
+    JvmanEnvironmentPathSnapshot *snapshot, wchar_t **value, DWORD type) {
+    size_t byte_count;
+    if (!snapshot) return;
+    jvman_environment_path_snapshot_free(snapshot);
+    snapshot->valid = 1;
+    if (!value || !*value) return;
+    byte_count = (wcslen(*value) + 1u) * sizeof(wchar_t);
+    snapshot->present = 1;
+    snapshot->type = (uint32_t)type;
+    snapshot->byte_count = (uint32_t)byte_count;
+    snapshot->value = *value;
+    *value = NULL;
+}
 
 JvmanEnvironmentStatus jvman_installer_metadata_load_scoped(
     JvmanEnvironmentScope scope, JvmanInstallerMetadata *metadata,
@@ -972,9 +1056,122 @@ JvmanEnvironmentStatus jvman_installer_metadata_delete(void) {
     return jvman_installer_metadata_delete_scoped(JVMAN_ENV_SCOPE_USER);
 }
 
+static JvmanEnvironmentStatus environment_value_snapshot_capture(
+    JvmanEnvironmentScope scope, const wchar_t *name,
+    JvmanEnvironmentValueSnapshot *snapshot) {
+    JvmanRegistryString current;
+    JvmanEnvironmentStatus status;
+    if (!valid_environment_scope((uint32_t)scope) || !name || !snapshot) {
+        return JVMAN_ENV_INVALID_ARGUMENT;
+    }
+    registry_string_init(&current);
+    status = read_environment_value(scope, name, &current);
+    if (status != JVMAN_ENV_OK) {
+        registry_string_free(&current);
+        return status;
+    }
+    jvman_environment_path_snapshot_free(snapshot);
+    snapshot->valid = 1;
+    snapshot->present = current.present;
+    snapshot->type = (uint32_t)current.type;
+    snapshot->byte_count = (uint32_t)current.byte_count;
+    snapshot->value = current.value;
+    current.value = NULL;
+    registry_string_free(&current);
+    return JVMAN_ENV_OK;
+}
+
+JvmanEnvironmentStatus jvman_environment_path_snapshot_capture(
+    JvmanEnvironmentScope scope, JvmanEnvironmentPathSnapshot *snapshot) {
+    return environment_value_snapshot_capture(scope, L"Path", snapshot);
+}
+
+JvmanEnvironmentStatus jvman_environment_java_home_snapshot_capture(
+    JvmanEnvironmentValueSnapshot *snapshot) {
+    return environment_value_snapshot_capture(
+        JVMAN_ENV_SCOPE_USER, L"JAVA_HOME", snapshot);
+}
+
+static JvmanEnvironmentStatus environment_value_snapshot_restore(
+    JvmanEnvironmentScope scope, const wchar_t *name,
+    const JvmanEnvironmentValueSnapshot *snapshot,
+    const JvmanEnvironmentValueSnapshot *expected_current,
+    int *changed_out) {
+    HKEY key = NULL;
+    JvmanRegistryString current;
+    JvmanEnvironmentStatus status;
+    LSTATUS result;
+    if (!valid_environment_scope((uint32_t)scope) || !name || !changed_out ||
+        !environment_path_snapshot_valid(snapshot) ||
+        !environment_path_snapshot_valid(expected_current)) {
+        return JVMAN_ENV_INVALID_ARGUMENT;
+    }
+    *changed_out = 0;
+    registry_string_init(&current);
+    status = open_environment_key(scope, KEY_QUERY_VALUE | KEY_SET_VALUE, 0,
+                                  &key);
+    if (status == JVMAN_ENV_NOT_FOUND) {
+        return !snapshot->present ? JVMAN_ENV_OK : JVMAN_ENV_CONFLICT;
+    }
+    if (status != JVMAN_ENV_OK) return status;
+    status = query_registry_string(key, name, JVMAN_ENV_VALUE_MAX_CHARS,
+                                   &current);
+    if (status != JVMAN_ENV_OK) {
+        RegCloseKey(key);
+        registry_string_free(&current);
+        return status == JVMAN_ENV_UNSUPPORTED_TYPE ||
+                       status == JVMAN_ENV_METADATA_INVALID
+                   ? JVMAN_ENV_CONFLICT
+                   : status;
+    }
+    if (registry_string_matches_path_snapshot(&current, snapshot)) {
+        RegCloseKey(key);
+        registry_string_free(&current);
+        return JVMAN_ENV_OK;
+    }
+    if (!registry_string_matches_path_snapshot(&current, expected_current)) {
+        RegCloseKey(key);
+        registry_string_free(&current);
+        return JVMAN_ENV_CONFLICT;
+    }
+    if (snapshot->present) {
+        result = RegSetValueExW(
+            key, name, 0, (DWORD)snapshot->type,
+            (const BYTE *)snapshot->value, (DWORD)snapshot->byte_count);
+        status = map_registry_status(result);
+    } else {
+        status = delete_registry_value(key, name);
+    }
+    RegCloseKey(key);
+    registry_string_free(&current);
+    if (status != JVMAN_ENV_OK) return status;
+    *changed_out = 1;
+    (void)jvman_environment_broadcast_change();
+    return JVMAN_ENV_OK;
+}
+
+JvmanEnvironmentStatus jvman_environment_path_snapshot_restore(
+    JvmanEnvironmentScope scope,
+    const JvmanEnvironmentPathSnapshot *snapshot,
+    const JvmanEnvironmentPathSnapshot *expected_current,
+    int *changed_out) {
+    return environment_value_snapshot_restore(
+        scope, L"Path", snapshot, expected_current, changed_out);
+}
+
+JvmanEnvironmentStatus jvman_environment_java_home_snapshot_restore(
+    const JvmanEnvironmentValueSnapshot *snapshot,
+    const JvmanEnvironmentValueSnapshot *expected_current,
+    int *changed_out) {
+    return environment_value_snapshot_restore(
+        JVMAN_ENV_SCOPE_USER, L"JAVA_HOME", snapshot, expected_current,
+        changed_out);
+}
+
 JvmanEnvironmentStatus jvman_environment_add_path(
     JvmanEnvironmentScope scope, const wchar_t *directory, int prior_owned,
-    int *owned_out, int *changed_out) {
+    int *owned_out, int *changed_out,
+    JvmanEnvironmentPathSnapshot *written_out) {
     JvmanRegistryString current;
     wchar_t *updated = NULL;
     JvmanPathListStatus path_status;
@@ -991,8 +1188,15 @@ JvmanEnvironmentStatus jvman_environment_add_path(
     registry_string_init(&current);
     status = read_environment_value(scope, L"Path", &current);
     if (status != JVMAN_ENV_OK) return status;
-    path_status = jvman_pathlist_add(
-        current.present ? current.value : L"", directory, &updated, &changed);
+    if (prior_owned) {
+        path_status = jvman_pathlist_prepend(
+            current.present ? current.value : L"", directory, &updated,
+            &changed);
+    } else {
+        path_status = jvman_pathlist_add(
+            current.present ? current.value : L"", directory, &updated,
+            &changed);
+    }
     status = map_pathlist_status(path_status);
     if (status != JVMAN_ENV_OK) {
         registry_string_free(&current);
@@ -1007,9 +1211,14 @@ JvmanEnvironmentStatus jvman_environment_add_path(
     }
     type = current.present ? current.type : REG_EXPAND_SZ;
     status = write_environment_value(scope, L"Path", updated, type);
+    if (status != JVMAN_ENV_OK) {
+        free(updated);
+        registry_string_free(&current);
+        return status;
+    }
+    environment_path_snapshot_take_written(written_out, &updated, type);
     free(updated);
     registry_string_free(&current);
-    if (status != JVMAN_ENV_OK) return status;
     *owned_out = 1;
     *changed_out = 1;
     (void)jvman_environment_broadcast_change();
@@ -1018,7 +1227,7 @@ JvmanEnvironmentStatus jvman_environment_add_path(
 
 JvmanEnvironmentStatus jvman_environment_remove_path(
     JvmanEnvironmentScope scope, const wchar_t *directory, int owned,
-    int *changed_out) {
+    int *changed_out, JvmanEnvironmentPathSnapshot *written_out) {
     JvmanRegistryString current;
     wchar_t *updated = NULL;
     JvmanPathListStatus path_status;
@@ -1052,9 +1261,19 @@ JvmanEnvironmentStatus jvman_environment_remove_path(
     }
     if (updated[0] == L'\0') status = delete_environment_value(scope, L"Path");
     else status = write_environment_value(scope, L"Path", updated, current.type);
+    if (status != JVMAN_ENV_OK) {
+        free(updated);
+        registry_string_free(&current);
+        return status;
+    }
+    if (updated[0] == L'\0') {
+        environment_path_snapshot_take_written(written_out, NULL, 0);
+    } else {
+        environment_path_snapshot_take_written(written_out, &updated,
+                                                current.type);
+    }
     free(updated);
     registry_string_free(&current);
-    if (status != JVMAN_ENV_OK) return status;
     *changed_out = 1;
     (void)jvman_environment_broadcast_change();
     return JVMAN_ENV_OK;
@@ -1062,10 +1281,12 @@ JvmanEnvironmentStatus jvman_environment_remove_path(
 
 JvmanEnvironmentStatus jvman_environment_configure_java_home(
     const wchar_t *java_home, JvmanInstallerMetadata *metadata,
-    int replace_existing, int *changed_out) {
+    int replace_existing, int *changed_out,
+    JvmanEnvironmentValueSnapshot *written_out) {
     JvmanRegistryString current;
     wchar_t *new_prior_value = NULL;
     wchar_t *new_managed_value = NULL;
+    wchar_t *written_value = NULL;
     JvmanEnvironmentStatus status;
     DWORD type;
     int changed = 0;
@@ -1121,14 +1342,29 @@ JvmanEnvironmentStatus jvman_environment_configure_java_home(
     }
     type = current.present ? current.type : REG_EXPAND_SZ;
     if (!current.present || wcscmp(current.value, java_home) != 0) {
+        if (written_out) {
+            status = duplicate_bounded(java_home, JVMAN_ENV_VALUE_MAX_CHARS,
+                                       &written_value);
+            if (status != JVMAN_ENV_OK) {
+                free(new_prior_value);
+                free(new_managed_value);
+                registry_string_free(&current);
+                return status;
+            }
+        }
         status = write_environment_value(JVMAN_ENV_SCOPE_USER, L"JAVA_HOME",
                                          java_home, type);
-        if (status == JVMAN_ENV_OK) changed = 1;
+        if (status == JVMAN_ENV_OK) {
+            changed = 1;
+            environment_path_snapshot_take_written(
+                written_out, &written_value, type);
+        }
     }
     registry_string_free(&current);
     if (status != JVMAN_ENV_OK) {
         free(new_prior_value);
         free(new_managed_value);
+        free(written_value);
         return status;
     }
     if (first_configuration) {
@@ -1147,14 +1383,17 @@ JvmanEnvironmentStatus jvman_environment_configure_java_home(
     *changed_out = changed;
     free(new_prior_value);
     free(new_managed_value);
+    free(written_value);
     if (changed) (void)jvman_environment_broadcast_change();
     return JVMAN_ENV_OK;
 }
 
 JvmanEnvironmentStatus jvman_environment_restore_java_home(
-    const JvmanInstallerMetadata *metadata, int *changed_out) {
+    const JvmanInstallerMetadata *metadata, int *changed_out,
+    JvmanEnvironmentValueSnapshot *written_out) {
     JvmanRegistryString current;
     JvmanEnvironmentStatus status;
+    wchar_t *written_value = NULL;
     if (!metadata || !changed_out) return JVMAN_ENV_INVALID_ARGUMENT;
     *changed_out = 0;
     if (!metadata->java_home_owned) return JVMAN_ENV_OK;
@@ -1173,6 +1412,15 @@ JvmanEnvironmentStatus jvman_environment_restore_java_home(
         return JVMAN_ENV_OK;
     }
     if (metadata->java_home_prior_present) {
+        if (written_out) {
+            status = duplicate_bounded(
+                metadata->java_home_prior_value, JVMAN_ENV_VALUE_MAX_CHARS,
+                &written_value);
+            if (status != JVMAN_ENV_OK) {
+                registry_string_free(&current);
+                return status;
+            }
+        }
         status = write_environment_value(
             JVMAN_ENV_SCOPE_USER, L"JAVA_HOME", metadata->java_home_prior_value,
             (DWORD)metadata->java_home_prior_type);
@@ -1180,7 +1428,18 @@ JvmanEnvironmentStatus jvman_environment_restore_java_home(
         status = delete_environment_value(JVMAN_ENV_SCOPE_USER, L"JAVA_HOME");
     }
     registry_string_free(&current);
-    if (status != JVMAN_ENV_OK) return status;
+    if (status != JVMAN_ENV_OK) {
+        free(written_value);
+        return status;
+    }
+    if (metadata->java_home_prior_present) {
+        environment_path_snapshot_take_written(
+            written_out, &written_value,
+            (DWORD)metadata->java_home_prior_type);
+    } else {
+        environment_path_snapshot_take_written(written_out, NULL, 0);
+    }
+    free(written_value);
     *changed_out = 1;
     (void)jvman_environment_broadcast_change();
     return JVMAN_ENV_OK;
@@ -1279,6 +1538,23 @@ JvmanEnvironmentStatus jvman_installer_metadata_load_scoped(
     return JVMAN_ENV_UNSUPPORTED;
 }
 
+JvmanEnvironmentStatus jvman_environment_java_home_snapshot_capture(
+    JvmanEnvironmentValueSnapshot *snapshot) {
+    if (!snapshot) return JVMAN_ENV_INVALID_ARGUMENT;
+    return JVMAN_ENV_UNSUPPORTED;
+}
+
+JvmanEnvironmentStatus jvman_environment_java_home_snapshot_restore(
+    const JvmanEnvironmentValueSnapshot *snapshot,
+    const JvmanEnvironmentValueSnapshot *expected_current,
+    int *changed_out) {
+    if (!snapshot || !expected_current || !changed_out) {
+        return JVMAN_ENV_INVALID_ARGUMENT;
+    }
+    *changed_out = 0;
+    return JVMAN_ENV_UNSUPPORTED;
+}
+
 JvmanEnvironmentStatus jvman_installer_metadata_load(
     JvmanInstallerMetadata *metadata, int *found_out) {
     return jvman_installer_metadata_load_scoped(
@@ -1311,43 +1587,71 @@ JvmanEnvironmentStatus jvman_installer_metadata_delete(void) {
     return jvman_installer_metadata_delete_scoped(JVMAN_ENV_SCOPE_USER);
 }
 
+JvmanEnvironmentStatus jvman_environment_path_snapshot_capture(
+    JvmanEnvironmentScope scope, JvmanEnvironmentPathSnapshot *snapshot) {
+    if (!valid_environment_scope((uint32_t)scope) || !snapshot) {
+        return JVMAN_ENV_INVALID_ARGUMENT;
+    }
+    return JVMAN_ENV_UNSUPPORTED;
+}
+
+JvmanEnvironmentStatus jvman_environment_path_snapshot_restore(
+    JvmanEnvironmentScope scope,
+    const JvmanEnvironmentPathSnapshot *snapshot,
+    const JvmanEnvironmentPathSnapshot *expected_current,
+    int *changed_out) {
+    if (!valid_environment_scope((uint32_t)scope) || !snapshot ||
+        !expected_current || !changed_out) {
+        return JVMAN_ENV_INVALID_ARGUMENT;
+    }
+    *changed_out = 0;
+    return JVMAN_ENV_UNSUPPORTED;
+}
+
 JvmanEnvironmentStatus jvman_environment_add_path(
     JvmanEnvironmentScope scope, const wchar_t *directory, int prior_owned,
-    int *owned_out, int *changed_out) {
+    int *owned_out, int *changed_out,
+    JvmanEnvironmentPathSnapshot *written_out) {
     if (!valid_environment_scope((uint32_t)scope) || !directory ||
         !owned_out || !changed_out) {
         return JVMAN_ENV_INVALID_ARGUMENT;
     }
     *owned_out = prior_owned;
     *changed_out = 0;
+    (void)written_out;
     return JVMAN_ENV_UNSUPPORTED;
 }
 
 JvmanEnvironmentStatus jvman_environment_remove_path(
     JvmanEnvironmentScope scope, const wchar_t *directory, int owned,
-    int *changed_out) {
+    int *changed_out, JvmanEnvironmentPathSnapshot *written_out) {
     if (!valid_environment_scope((uint32_t)scope) || !directory ||
         !changed_out) {
         return JVMAN_ENV_INVALID_ARGUMENT;
     }
     *changed_out = 0;
     (void)owned;
+    (void)written_out;
     return JVMAN_ENV_UNSUPPORTED;
 }
 
 JvmanEnvironmentStatus jvman_environment_configure_java_home(
     const wchar_t *java_home, JvmanInstallerMetadata *metadata,
-    int replace_existing, int *changed_out) {
+    int replace_existing, int *changed_out,
+    JvmanEnvironmentValueSnapshot *written_out) {
     if (!java_home || !metadata || !changed_out) return JVMAN_ENV_INVALID_ARGUMENT;
     *changed_out = 0;
     (void)replace_existing;
+    (void)written_out;
     return JVMAN_ENV_UNSUPPORTED;
 }
 
 JvmanEnvironmentStatus jvman_environment_restore_java_home(
-    const JvmanInstallerMetadata *metadata, int *changed_out) {
+    const JvmanInstallerMetadata *metadata, int *changed_out,
+    JvmanEnvironmentValueSnapshot *written_out) {
     if (!metadata || !changed_out) return JVMAN_ENV_INVALID_ARGUMENT;
     *changed_out = 0;
+    (void)written_out;
     return JVMAN_ENV_UNSUPPORTED;
 }
 

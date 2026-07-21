@@ -347,13 +347,11 @@ JvmanPathListStatus jvman_pathlist_add(const wchar_t *path_value,
         free(normalized_target);
         return JVMAN_PATHLIST_NO_MEMORY;
     }
+    memcpy(result, normalized_target, target_length * sizeof(wchar_t));
     if (path_length != 0u) {
-        memcpy(result, path_value, path_length * sizeof(wchar_t));
-        result[path_length] = L';';
-        memcpy(result + path_length + 1u, normalized_target,
-               target_length * sizeof(wchar_t));
-    } else {
-        memcpy(result, normalized_target, target_length * sizeof(wchar_t));
+        result[target_length] = L';';
+        memcpy(result + target_length + 1u, path_value,
+               path_length * sizeof(wchar_t));
     }
     result[result_length] = L'\0';
     free(normalized_target);
@@ -425,6 +423,33 @@ JvmanPathListStatus jvman_pathlist_remove(const wchar_t *path_value,
     }
     result[output_length] = L'\0';
     free(normalized_target);
+    *result_out = result;
+    return JVMAN_PATHLIST_OK;
+}
+
+JvmanPathListStatus jvman_pathlist_prepend(const wchar_t *path_value,
+                                           const wchar_t *target,
+                                           wchar_t **result_out,
+                                           int *changed_out) {
+    wchar_t *without_target = NULL;
+    wchar_t *result = NULL;
+    int removed = 0;
+    int added = 0;
+    JvmanPathListStatus status;
+    if (!result_out || !changed_out) return JVMAN_PATHLIST_INVALID_ARGUMENT;
+    *result_out = NULL;
+    *changed_out = 0;
+    status = jvman_pathlist_remove(path_value, target, &without_target, &removed);
+    if (status != JVMAN_PATHLIST_OK) return status;
+    status = jvman_pathlist_add(without_target, target, &result, &added);
+    free(without_target);
+    if (status != JVMAN_PATHLIST_OK) {
+        free(result);
+        return status;
+    }
+    (void)removed;
+    (void)added;
+    *changed_out = wcscmp(path_value, result) != 0;
     *result_out = result;
     return JVMAN_PATHLIST_OK;
 }

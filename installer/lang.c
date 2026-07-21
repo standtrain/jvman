@@ -36,7 +36,8 @@ static const wchar_t *const lang_table[JVMAN_LANG_COUNT][JVMAN_STR_COUNT] = {
         [JVMAN_STR_PATH_SCOPE_PROMPT]    = L"Add PATH entries for all users?\n\n"
                                             L"Choose Yes for the system PATH. Choose No for only your user PATH.\n"
                                             L"Yes installs jvman in Program Files and Windows will request administrator permission.",
-        [JVMAN_STR_CONFIGURE_JAVA_PROMPT]= L"A valid jvman current JDK exists. Configure JAVA_HOME?\n\n"
+        [JVMAN_STR_CONFIGURE_JAVA_PROMPT]= L"Configure JAVA_HOME for jvman?\n\n"
+                                            L"JAVA_HOME uses the stable current path and becomes valid after the first `jvman use`.\n"
                                             L"The stable current\\bin path follows the earlier PATH choice.\n"
                                             L"This may replace the current user JAVA_HOME value.",
         [JVMAN_STR_DISCOVER_PROMPT]      = L"Discover and register installed JDKs after installation?\n\n"
@@ -129,7 +130,8 @@ static const wchar_t *const lang_table[JVMAN_LANG_COUNT][JVMAN_STR_COUNT] = {
         [JVMAN_STR_PATH_SCOPE_PROMPT]    = L"为所有用户添加 PATH 条目？\n\n"
                                             L"选择“是”将写入系统 PATH，选择“否”仅写入当前用户 PATH。\n"
                                             L"选择“是”会将 jvman 安装到 Program Files，Windows 随后会请求管理员权限。",
-        [JVMAN_STR_CONFIGURE_JAVA_PROMPT]= L"检测到有效的 jvman current JDK。是否配置 JAVA_HOME？\n\n"
+        [JVMAN_STR_CONFIGURE_JAVA_PROMPT]= L"是否为 jvman 配置 JAVA_HOME？\n\n"
+                                            L"JAVA_HOME 使用稳定的 current 路径，并在首次执行 `jvman use` 后变为有效。\n"
                                             L"稳定的 current\\bin 路径由前面的 PATH 选择管理。\n"
                                             L"这可能会替换当前用户的 JAVA_HOME 值。",
         [JVMAN_STR_DISCOVER_PROMPT]      = L"安装完成后是否自动发现并注册已安装的 JDK？\n\n"

@@ -33,6 +33,16 @@ typedef enum JvmanEnvironmentScope {
     JVMAN_ENV_SCOPE_MACHINE = 1
 } JvmanEnvironmentScope;
 
+typedef struct JvmanEnvironmentPathSnapshot {
+    int valid;
+    int present;
+    uint32_t type;
+    uint32_t byte_count;
+    wchar_t *value;
+} JvmanEnvironmentPathSnapshot;
+
+typedef JvmanEnvironmentPathSnapshot JvmanEnvironmentValueSnapshot;
+
 /*
  * Values persisted below Software\\jvman\\Installer in the registry hive
  * selected by the metadata API.
@@ -62,6 +72,14 @@ const wchar_t *jvman_environment_status_message(JvmanEnvironmentStatus status);
 
 void jvman_installer_metadata_init(JvmanInstallerMetadata *metadata);
 void jvman_installer_metadata_free(JvmanInstallerMetadata *metadata);
+void jvman_environment_path_snapshot_init(
+    JvmanEnvironmentPathSnapshot *snapshot);
+void jvman_environment_path_snapshot_free(
+    JvmanEnvironmentPathSnapshot *snapshot);
+void jvman_environment_value_snapshot_init(
+    JvmanEnvironmentValueSnapshot *snapshot);
+void jvman_environment_value_snapshot_free(
+    JvmanEnvironmentValueSnapshot *snapshot);
 
 /*
  * Scoped metadata operations accept only USER or MACHINE.  found_out is set
@@ -91,17 +109,34 @@ JvmanEnvironmentStatus jvman_installer_metadata_delete(void);
  */
 JvmanEnvironmentStatus jvman_environment_add_path(
     JvmanEnvironmentScope scope, const wchar_t *directory, int prior_owned,
-    int *owned_out, int *changed_out);
+    int *owned_out, int *changed_out,
+    JvmanEnvironmentPathSnapshot *written_out);
 JvmanEnvironmentStatus jvman_environment_remove_path(
     JvmanEnvironmentScope scope, const wchar_t *directory, int owned,
+    int *changed_out, JvmanEnvironmentPathSnapshot *written_out);
+/* Capture PATH and restore after verifying that current still matches expected. */
+JvmanEnvironmentStatus jvman_environment_path_snapshot_capture(
+    JvmanEnvironmentScope scope, JvmanEnvironmentPathSnapshot *snapshot);
+JvmanEnvironmentStatus jvman_environment_path_snapshot_restore(
+    JvmanEnvironmentScope scope,
+    const JvmanEnvironmentPathSnapshot *snapshot,
+    const JvmanEnvironmentPathSnapshot *expected_current,
     int *changed_out);
 
 /* Configure and restore the per-user JAVA_HOME value. */
 JvmanEnvironmentStatus jvman_environment_configure_java_home(
     const wchar_t *java_home, JvmanInstallerMetadata *metadata,
-    int replace_existing, int *changed_out);
+    int replace_existing, int *changed_out,
+    JvmanEnvironmentValueSnapshot *written_out);
 JvmanEnvironmentStatus jvman_environment_restore_java_home(
-    const JvmanInstallerMetadata *metadata, int *changed_out);
+    const JvmanInstallerMetadata *metadata, int *changed_out,
+    JvmanEnvironmentValueSnapshot *written_out);
+JvmanEnvironmentStatus jvman_environment_java_home_snapshot_capture(
+    JvmanEnvironmentValueSnapshot *snapshot);
+JvmanEnvironmentStatus jvman_environment_java_home_snapshot_restore(
+    const JvmanEnvironmentValueSnapshot *snapshot,
+    const JvmanEnvironmentValueSnapshot *expected_current,
+    int *changed_out);
 
 /*
  * Add/Remove Programs registration in the registry hive selected by scope.

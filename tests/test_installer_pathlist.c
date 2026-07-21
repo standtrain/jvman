@@ -47,6 +47,18 @@ static void check_remove(const wchar_t *before, const wchar_t *target,
     free(result);
 }
 
+static void check_prepend(const wchar_t *before, const wchar_t *target,
+                          const wchar_t *expected, int expected_changed) {
+    wchar_t *result = NULL;
+    int changed = -1;
+    CHECK(jvman_pathlist_prepend(before, target, &result, &changed) ==
+          JVMAN_PATHLIST_OK);
+    CHECK(result != NULL);
+    if (result) CHECK(wcscmp(result, expected) == 0);
+    CHECK(changed == expected_changed);
+    free(result);
+}
+
 static void check_contains(const wchar_t *path_value, const wchar_t *target,
                            int expected) {
     int found = -1;
@@ -58,7 +70,7 @@ static void check_contains(const wchar_t *path_value, const wchar_t *target,
 static void test_add_and_contains(void) {
     check_add(L"", L"C:\\jvman\\bin", L"C:\\jvman\\bin", 1);
     check_add(L"C:\\Windows", L"C:\\jvman\\bin",
-              L"C:\\Windows;C:\\jvman\\bin", 1);
+              L"C:\\jvman\\bin;C:\\Windows", 1);
     check_contains(L"C:\\jvman\\bin;C:\\Windows", L"C:\\jvman\\bin", 1);
     check_contains(L"C:\\Windows;C:\\jvman\\bin;C:\\Tools",
                    L"C:\\jvman\\bin", 1);
@@ -71,7 +83,7 @@ static void test_add_and_contains(void) {
               L"C:\\Program Files\\jvman\\bin",
               L"  \"C:\\Program Files\\jvman\\bin\\\"  ", 0);
     check_add(L"C:\\Windows;", L"C:\\jvman\\bin",
-              L"C:\\Windows;;C:\\jvman\\bin", 1);
+              L"C:\\jvman\\bin;C:\\Windows;", 1);
     check_add(L"  \\\\server/share\\jvman\\bin\\  ",
               L"\\\\SERVER\\SHARE\\JVMAN\\BIN",
               L"  \\\\server/share\\jvman\\bin\\  ", 0);
@@ -91,6 +103,19 @@ static void test_remove(void) {
                  L"C:\\jvman\\binary;C:\\Tools", 0);
     check_remove(L"A;;C:\\jvman\\bin;B", L"C:\\jvman\\bin",
                  L"A;;B", 1);
+}
+
+static void test_prepend(void) {
+    check_prepend(L"C:\\jvman\\bin;C:\\Windows", L"C:\\jvman\\bin",
+                  L"C:\\jvman\\bin;C:\\Windows", 0);
+    check_prepend(L"C:\\Windows;C:\\jvman\\bin;C:\\Tools",
+                  L"C:\\jvman\\bin",
+                  L"C:\\jvman\\bin;C:\\Windows;C:\\Tools", 1);
+    check_prepend(L"C:\\Windows", L"C:\\jvman\\bin",
+                  L"C:\\jvman\\bin;C:\\Windows", 1);
+    check_prepend(L"C:\\JVMAN\\BIN;C:\\Windows;C:\\jvman\\bin\\",
+                  L"C:\\jvman\\bin",
+                  L"C:\\jvman\\bin;C:\\Windows", 1);
 }
 
 static void test_environment_and_unicode(void) {
@@ -186,6 +211,7 @@ static void test_length_limit(void) {
 int wmain(void) {
     test_add_and_contains();
     test_remove();
+    test_prepend();
     test_environment_and_unicode();
     test_invalid_targets();
     test_length_limit();
