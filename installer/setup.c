@@ -369,6 +369,70 @@ static int installer_report_status(const wchar_t *title, const wchar_t *prefix,
     return installer_report(title, message, MB_OK | MB_ICONERROR, silent);
 }
 
+static int installer_registered_uninstaller_matches(
+    const wchar_t *module, const JvmanInstallerMetadata *metadata,
+    JvmanInstallPaths *paths_out) {
+    JvmanInstallPaths paths;
+    wchar_t marker[JVMAN_INSTALL_MARKER_ID_CHARS];
+    if (!module || !metadata || !metadata->install_dir ||
+        !metadata->data_home ||
+        jvman_install_paths_init(&paths, metadata->install_dir,
+                                 metadata->data_home) != JVMAN_INSTALL_OK ||
+        _wcsicmp(module, paths.uninstall_path) != 0) {
+        return 0;
+    }
+    if (!metadata->install_id || !*metadata->install_id ||
+        jvman_install_marker_read(
+            &paths, marker,
+            sizeof(marker) / sizeof(marker[0])) != JVMAN_INSTALL_OK ||
+        _wcsicmp(marker, metadata->install_id) != 0) {
+        return -1;
+    }
+    if (paths_out) *paths_out = paths;
+    return 1;
+}
+
+/* A copied setup bundle becomes an uninstaller only when its canonical
+ * registered path and installation marker both match persisted metadata. */
+static int installer_detect_registered_uninstaller(
+    int argc, InstallerOptions *options) {
+    JvmanInstallerMetadata metadata;
+    wchar_t module[JVMAN_INSTALL_PATH_CHARS];
+    DWORD module_length;
+    DWORD attributes;
+    int found = 0;
+    int matched = 0;
+    JvmanEnvironmentStatus env_status;
+    if (!options || (argc != 1 && !(argc == 2 && options->silent))) return 0;
+    module_length = GetModuleFileNameW(
+        NULL, module, (DWORD)(sizeof(module) / sizeof(module[0])));
+    if (module_length == 0 ||
+        module_length >= sizeof(module) / sizeof(module[0])) {
+        return 0;
+    }
+    attributes = GetFileAttributesW(module);
+    if (attributes == INVALID_FILE_ATTRIBUTES ||
+        (attributes & (FILE_ATTRIBUTE_DIRECTORY |
+                       FILE_ATTRIBUTE_REPARSE_POINT)) != 0) {
+        return 0;
+    }
+
+    jvman_installer_metadata_init(&metadata);
+    env_status = jvman_installer_metadata_load(&metadata, &found);
+    if (env_status == JVMAN_ENV_OK && found) {
+        matched = installer_registered_uninstaller_matches(
+            module, &metadata, NULL);
+    }
+    jvman_installer_metadata_free(&metadata);
+    if (matched < 0) return -1;
+    if (matched > 0) {
+        options->uninstall = 1;
+        return 1;
+    }
+
+    return 0;
+}
+
 static int installer_parse_process_id(const wchar_t *text, DWORD *value_out) {
     uint64_t value = 0;
     size_t index;
@@ -650,10 +714,16 @@ static int installer_cleanup_worker(int argc, wchar_t **argv) {
     }
     (void)installer_mark_cleanup_helper_for_deletion(module);
     parent = OpenProcess(SYNCHRONIZE, FALSE, parent_id);
-    if (!parent) return 1;
-    wait_result = WaitForSingleObject(parent, INFINITE);
-    CloseHandle(parent);
-    if (wait_result != WAIT_OBJECT_0) return 1;
+    if (parent) {
+        wait_result = WaitForSingleObject(parent, INFINITE);
+        CloseHandle(parent);
+        if (wait_result != WAIT_OBJECT_0) return 1;
+    } else if (GetLastError() != ERROR_INVALID_PARAMETER) {
+        return 1;
+    }
+    /* ERROR_INVALID_PARAMETER means the validated parent PID already exited
+     * before this helper could open it. Metadata validation below still gates
+     * every deletion, so the cleanup can safely continue in that race. */
     /* The parent removes its registry record only after all environment and
      * ARP operations succeed.  If it crashed or a registry write failed,
      * leave the authenticated files in place for a retry. */
@@ -1343,6 +1413,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous,
     int already_running;
     int language_result;
     int parse_result;
+    int auto_uninstall_result;
     int result;
     HRESULT com_status;
     int com_initialized;
@@ -1415,6 +1486,19 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous,
             if (com_initialized) CoUninitialize();
             return language_result > 0 ? 0 : 1;
         }
+    }
+    auto_uninstall_result = installer_detect_registered_uninstaller(
+        argc, &options);
+    if (auto_uninstall_result < 0) {
+        installer_report(
+            jvman_lang_str(JVMAN_STR_APP_TITLE),
+            jvman_lang_str(JVMAN_STR_UNINSTALL_RECORD_INVALID),
+            MB_OK | MB_ICONERROR, options.silent);
+        ReleaseMutex(instance_mutex);
+        CloseHandle(instance_mutex);
+        LocalFree(argv);
+        if (com_initialized) CoUninitialize();
+        return 1;
     }
     if (!options.silent && !options.uninstall && !options.portable) {
         parse_result = installer_prepare_gui_options(&options);

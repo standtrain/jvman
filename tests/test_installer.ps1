@@ -37,8 +37,11 @@ $portableDir = Join-Path $root '中文 path with spaces'
 $blockedDir = Join-Path $root 'blocked-target'
 $corruptDir = Join-Path $root 'corrupt-target'
 $corruptSetup = Join-Path $root 'corrupt setup.exe'
+$regularInstallDir = Join-Path $root 'regular-install'
+$regularDataDir = Join-Path $root 'regular-data'
 $beforePath = [Environment]::GetEnvironmentVariable('Path', 'User')
 $beforeJavaHome = [Environment]::GetEnvironmentVariable('JAVA_HOME', 'User')
+$beforeProcessJvmanHome = [Environment]::GetEnvironmentVariable('JVMAN_HOME', 'Process')
 $beforeInstallerState = Test-Path -LiteralPath 'Registry::HKEY_CURRENT_USER\Software\jvman\Installer'
 $beforeArpState = Test-Path -LiteralPath 'Registry::HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Uninstall\jvman'
 
@@ -96,6 +99,52 @@ try {
     }
     if (Test-Path -LiteralPath (Join-Path $corruptDir 'jvman.exe')) {
         throw 'Corrupted setup published a payload'
+    }
+
+    if (-not $beforeInstallerState -and -not $beforeArpState) {
+        $regularUninstaller = Join-Path $regularInstallDir 'uninstall.exe'
+        [Environment]::SetEnvironmentVariable('JVMAN_HOME', $regularDataDir, 'Process')
+        try {
+            $regularArguments = @('/S', '/NO_PATH', "/DIR=`"$regularInstallDir`"")
+            Assert-Equal 0 (Invoke-GuiProcess $setupPath $regularArguments) 'Regular install failed'
+            if (-not (Test-Path -LiteralPath $regularUninstaller -PathType Leaf)) {
+                throw "Regular install did not create $regularUninstaller"
+            }
+
+            # /S is intentionally the only argument: the installed copy must
+            # infer uninstall mode from authenticated installation state.
+            Assert-Equal 0 (Invoke-GuiProcess $regularUninstaller @('/S')) 'Installed uninstaller did not infer uninstall mode'
+            $cleanupDeadline = [DateTime]::UtcNow.AddSeconds(10)
+            while (((Test-Path -LiteralPath $regularUninstaller) -or
+                    (Test-Path -LiteralPath (Join-Path $regularInstallDir 'jvman.exe')) -or
+                    (Test-Path -LiteralPath (Join-Path $regularInstallDir 'install.marker')) -or
+                    (Test-Path -LiteralPath 'Registry::HKEY_CURRENT_USER\Software\jvman\Installer')) -and
+                   [DateTime]::UtcNow -lt $cleanupDeadline) {
+                Start-Sleep -Milliseconds 100
+            }
+            $uninstallerRemaining = Test-Path -LiteralPath $regularUninstaller
+            $executableRemaining = Test-Path -LiteralPath (Join-Path $regularInstallDir 'jvman.exe')
+            $markerRemaining = Test-Path -LiteralPath (Join-Path $regularInstallDir 'install.marker')
+            $metadataRemaining = Test-Path -LiteralPath 'Registry::HKEY_CURRENT_USER\Software\jvman\Installer'
+            if ($uninstallerRemaining -or $executableRemaining -or
+                $markerRemaining -or $metadataRemaining) {
+                throw "Direct uninstall cleanup incomplete (uninstaller=$uninstallerRemaining, executable=$executableRemaining, marker=$markerRemaining, metadata=$metadataRemaining)"
+            }
+            Assert-Equal $false (Test-Path -LiteralPath 'Registry::HKEY_CURRENT_USER\Software\jvman\Installer') 'Direct uninstaller left installer registry state'
+            Assert-Equal $false (Test-Path -LiteralPath 'Registry::HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Uninstall\jvman') 'Direct uninstaller left Add/Remove Programs state'
+        }
+        finally {
+            [Environment]::SetEnvironmentVariable('JVMAN_HOME', $beforeProcessJvmanHome, 'Process')
+            if ((Test-Path -LiteralPath $regularUninstaller -PathType Leaf) -and
+                (Test-Path -LiteralPath 'Registry::HKEY_CURRENT_USER\Software\jvman\Installer')) {
+                try {
+                    [void](Invoke-GuiProcess $regularUninstaller @('/S', '/UNINSTALL'))
+                }
+                catch {
+                    Write-Warning 'Could not clean up the temporary regular installation.'
+                }
+            }
+        }
     }
 
     Assert-Equal $beforePath ([Environment]::GetEnvironmentVariable('Path', 'User')) 'Portable install changed user PATH'
