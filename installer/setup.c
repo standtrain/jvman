@@ -2361,7 +2361,7 @@ static int installer_run_discover(const JvmanInstallPaths *paths) {
     memset(&startup, 0, sizeof(startup));
     startup.cb = sizeof(startup);
     memset(&process, 0, sizeof(process));
-    if (!CreateProcessW(NULL, command, NULL, NULL, FALSE,
+    if (!CreateProcessW(paths->jvman_path, command, NULL, NULL, FALSE,
                         CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT,
                         NULL, NULL, &startup, &process)) {
         (void)SetEnvironmentVariableW(

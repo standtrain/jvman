@@ -1489,12 +1489,13 @@ static int resolve_fastest_download_source(
         char checksum[80];
         char version[128];
     } ResolvedSource;
-    ResolvedSource resolved_sources[JVMAN_DOWNLOAD_SOURCE_LIMIT] = {0};
-    JvmanDownloadSourceProbe probes[JVMAN_DOWNLOAD_SOURCE_LIMIT] = {0};
+    ResolvedSource *resolved_sources = NULL;
+    JvmanDownloadSourceProbe *probes = NULL;
     const JvmanDownloadSource *best;
     ResolvedSource *best_result = NULL;
     size_t resolved_count = 0;
     size_t i;
+    int result = -1;
     if (!registry || !metadata_path || !selected_out || !download_url ||
         url_size == 0 || !checksum || checksum_size == 0 || !exact_version ||
         version_size == 0) {
@@ -1503,6 +1504,10 @@ static int resolve_fastest_download_source(
     jvman_i18n_puts("Testing download sources...");
     fflush(stdout);
     if (registry->count > JVMAN_DOWNLOAD_SOURCE_LIMIT) return -1;
+    resolved_sources = calloc(JVMAN_DOWNLOAD_SOURCE_LIMIT,
+                              sizeof(*resolved_sources));
+    probes = calloc(JVMAN_DOWNLOAD_SOURCE_LIMIT, sizeof(*probes));
+    if (!resolved_sources || !probes) goto cleanup;
     for (i = 0; i < registry->count; ++i) {
         const JvmanDownloadSource *source = registry->items[i];
         ResolvedSource *candidate;
@@ -1516,7 +1521,7 @@ static int resolve_fastest_download_source(
         if ((platform_path_exists(metadata_path) &&
              platform_remove_file(metadata_path) != 0) ||
             platform_monotonic_millis(&started) != 0) {
-            return -1;
+            goto cleanup;
         }
         platform_clear_error();
         resolved = download_metadata(
@@ -1530,7 +1535,7 @@ static int resolve_fastest_download_source(
                                             JVMAN_DOWNLOAD_PROBE_TIMEOUT);
         }
         if (platform_monotonic_millis(&finished) != 0 || finished < started) {
-            return -1;
+            goto cleanup;
         }
         elapsed = finished - started;
         candidate->probe.elapsed_millis = elapsed;
@@ -1552,7 +1557,7 @@ static int resolve_fastest_download_source(
     }
     best = jvman_download_source_select_fastest(
         probes, resolved_count);
-    if (!best) return -1;
+    if (!best) goto cleanup;
     for (i = 0; i < resolved_count; ++i) {
         if (resolved_sources[i].probe.source == best) {
             best_result = &resolved_sources[i];
@@ -1562,7 +1567,7 @@ static int resolve_fastest_download_source(
     if (!best_result || strlen(best_result->url) >= url_size ||
         strlen(best_result->checksum) >= checksum_size ||
         strlen(best_result->version) >= version_size) {
-        return -1;
+        goto cleanup;
     }
     strcpy(download_url, best_result->url);
     strcpy(checksum, best_result->checksum);
@@ -1571,7 +1576,11 @@ static int resolve_fastest_download_source(
     printf("Selected download source: %s (%" PRIu64 " ms)\n",
            best->name, best_result->probe.elapsed_millis);
     fflush(stdout);
-    return 0;
+    result = 0;
+cleanup:
+    free(resolved_sources);
+    free(probes);
+    return result;
 }
 
 static int extract_archive(const char *archive, const char *destination) {
