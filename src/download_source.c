@@ -13,9 +13,18 @@
 #define JVMAN_JSON_DEPTH_MAX 64u
 
 static const JvmanDownloadSource download_sources[] = {
-    {"auto", "Automatic (fastest available)", JVMAN_DOWNLOAD_SOURCE_AUTO},
-    {"adoptium", "Adoptium API", JVMAN_DOWNLOAD_SOURCE_ADOPTIUM},
-    {"foojay", "Foojay Disco API", JVMAN_DOWNLOAD_SOURCE_FOOJAY}
+    {"auto", "Automatic (fastest available)", JVMAN_DOWNLOAD_SOURCE_AUTO,
+     NULL, NULL},
+    {"tsinghua", "Tsinghua TUNA", JVMAN_DOWNLOAD_SOURCE_TSINGHUA,
+     NULL, NULL},
+    {"huawei", "Huawei BiSheng", JVMAN_DOWNLOAD_SOURCE_FOOJAY,
+     "bisheng", NULL},
+    {"aliyun", "Alibaba Dragonwell", JVMAN_DOWNLOAD_SOURCE_FOOJAY,
+     "dragonwell", NULL},
+    {"adoptium", "Adoptium API", JVMAN_DOWNLOAD_SOURCE_ADOPTIUM,
+     NULL, NULL},
+    {"foojay", "Foojay Disco API", JVMAN_DOWNLOAD_SOURCE_FOOJAY,
+     "temurin", NULL}
 };
 
 const JvmanDownloadSource *jvman_download_source_default(void) {
@@ -70,6 +79,98 @@ static const char *foojay_architecture(const char *architecture) {
     return architecture;
 }
 
+static int append_text(char *out, size_t out_size, size_t *used,
+                       const char *text) {
+    size_t length = strlen(text);
+    if (!out || !used || !text || out_size == 0 || *used >= out_size) return -1;
+    if (length > out_size - *used - 1) return -1;
+    memcpy(out + *used, text, length);
+    *used += length;
+    out[*used] = '\0';
+    return 0;
+}
+
+static int custom_template_expand(
+    const char *url_template, int major, const char *os,
+    const char *architecture, const char *archive_extension,
+    char *out, size_t out_size) {
+    const char *cursor = url_template;
+    size_t used = 0;
+    char major_text[16];
+    int written = snprintf(major_text, sizeof(major_text), "%d", major);
+    if (written < 0 || (size_t)written >= sizeof(major_text) ||
+        !out || out_size == 0) {
+        return -1;
+    }
+    out[0] = '\0';
+    while (*cursor) {
+        const char *replacement = NULL;
+        size_t token_length = 0;
+        if (strncmp(cursor, "{major}", 7) == 0) {
+            replacement = major_text;
+            token_length = 7;
+        } else if (strncmp(cursor, "{os}", 4) == 0) {
+            replacement = os;
+            token_length = 4;
+        } else if (strncmp(cursor, "{arch}", 6) == 0) {
+            replacement = architecture;
+            token_length = 6;
+        } else if (strncmp(cursor, "{archive}", 9) == 0) {
+            replacement = archive_extension;
+            token_length = 9;
+        }
+        if (replacement) {
+            if (append_text(out, out_size, &used, replacement) != 0) return -1;
+            cursor += token_length;
+        } else {
+            char literal[2] = {*cursor++, '\0'};
+            if (append_text(out, out_size, &used, literal) != 0) return -1;
+        }
+    }
+    return 0;
+}
+
+int jvman_download_source_valid_custom_template(const char *url_template) {
+    const char *cursor;
+    const char *authority_end;
+    int has_major = 0;
+    if (!url_template || strncmp(url_template, "https://", 8) != 0 ||
+        strlen(url_template) >= JVMAN_SOURCE_URL_MAX) {
+        return 0;
+    }
+    authority_end = strpbrk(url_template + 8, "/?#");
+    if (!authority_end) authority_end = url_template + strlen(url_template);
+    if (authority_end == url_template + 8 ||
+        memchr(url_template + 8, '@',
+               (size_t)(authority_end - (url_template + 8))) != NULL ||
+        strchr(url_template, '#')) {
+        return 0;
+    }
+    for (cursor = url_template; *cursor; ++cursor) {
+        if ((unsigned char)*cursor <= 0x20 || *cursor == 0x7f ||
+            *cursor == '\\' || *cursor == '"') {
+            return 0;
+        }
+        if (*cursor == '{') {
+            if (strncmp(cursor, "{major}", 7) == 0) {
+                has_major = 1;
+                cursor += 6;
+            } else if (strncmp(cursor, "{os}", 4) == 0) {
+                cursor += 3;
+            } else if (strncmp(cursor, "{arch}", 6) == 0) {
+                cursor += 5;
+            } else if (strncmp(cursor, "{archive}", 9) == 0) {
+                cursor += 8;
+            } else {
+                return 0;
+            }
+        } else if (*cursor == '}') {
+            return 0;
+        }
+    }
+    return has_major;
+}
+
 int jvman_download_source_build_metadata_url(
     const JvmanDownloadSource *source, int major, const char *os,
     const char *architecture, const char *archive_extension,
@@ -80,7 +181,17 @@ int jvman_download_source_build_metadata_url(
         !*archive_extension || !out || out_size == 0) {
         return -1;
     }
-    if (source->kind == JVMAN_DOWNLOAD_SOURCE_ADOPTIUM) {
+    if (source->kind == JVMAN_DOWNLOAD_SOURCE_CUSTOM_ADOPTIUM) {
+        if (!jvman_download_source_valid_custom_template(
+                source->metadata_template) ||
+            custom_template_expand(source->metadata_template, major, os,
+                                   architecture, archive_extension,
+                                   out, out_size) != 0) {
+            return -1;
+        }
+        written = (int)strlen(out);
+    } else if (source->kind == JVMAN_DOWNLOAD_SOURCE_ADOPTIUM ||
+               source->kind == JVMAN_DOWNLOAD_SOURCE_TSINGHUA) {
         written = snprintf(
             out, out_size,
             "https://api.adoptium.net/v3/assets/latest/%d/hotspot?"
@@ -92,13 +203,14 @@ int jvman_download_source_build_metadata_url(
         const char *archive_type = archive_extension[0] == '.'
                                        ? archive_extension + 1
                                        : archive_extension;
+        if (!source->distribution || !*source->distribution) return -1;
         written = snprintf(
             out, out_size,
             "https://api.foojay.io/disco/v3.0/packages?version=%d&"
-            "distribution=temurin&architecture=%s&archive_type=%s&"
+            "distribution=%s&architecture=%s&archive_type=%s&"
             "package_type=jdk&operating_system=%s&release_status=ga&"
             "latest=overall&directly_downloadable=true",
-            major, foojay_architecture(architecture), archive_type,
+            major, source->distribution, foojay_architecture(architecture), archive_type,
             foojay_os(os));
     } else {
         return -1;
@@ -117,6 +229,7 @@ static int valid_sha256(const char *text) {
 
 static int valid_https_url(const char *url) {
     const unsigned char *cursor = (const unsigned char *)url;
+    const char *authority_end;
     size_t length = 0;
     if (!url) return 0;
     while (length < JVMAN_SOURCE_URL_MAX && url[length]) ++length;
@@ -124,8 +237,18 @@ static int valid_https_url(const char *url) {
         strncmp(url, "https://", 8) != 0) {
         return 0;
     }
+    authority_end = strpbrk(url + 8, "/?#");
+    if (!authority_end) authority_end = url + length;
+    if (authority_end == url + 8 ||
+        memchr(url + 8, '@', (size_t)(authority_end - (url + 8))) != NULL ||
+        strchr(url, '#')) {
+        return 0;
+    }
     for (; *cursor; ++cursor) {
-        if (*cursor <= 0x20 || *cursor == 0x7f) return 0;
+        if (*cursor <= 0x20 || *cursor == 0x7f ||
+            *cursor == '\\' || *cursor == '"') {
+            return 0;
+        }
     }
     return 1;
 }
@@ -605,7 +728,9 @@ int jvman_download_source_parse_catalog(
     }
     detail_url[0] = '\0';
     exact_version[0] = '\0';
-    if (source->kind == JVMAN_DOWNLOAD_SOURCE_ADOPTIUM) {
+    if (source->kind == JVMAN_DOWNLOAD_SOURCE_ADOPTIUM ||
+        source->kind == JVMAN_DOWNLOAD_SOURCE_TSINGHUA ||
+        source->kind == JVMAN_DOWNLOAD_SOURCE_CUSTOM_ADOPTIUM) {
         if (jvman_json_string_field(json, "\"version\"", "openjdk_version",
                                     exact_version, version_size) != 0 ||
             !valid_version_for_major(exact_version, major)) {
@@ -643,7 +768,9 @@ int jvman_download_source_parse_package(
     }
     download_url[0] = '\0';
     checksum[0] = '\0';
-    if (source->kind == JVMAN_DOWNLOAD_SOURCE_ADOPTIUM) {
+    if (source->kind == JVMAN_DOWNLOAD_SOURCE_ADOPTIUM ||
+        source->kind == JVMAN_DOWNLOAD_SOURCE_TSINGHUA ||
+        source->kind == JVMAN_DOWNLOAD_SOURCE_CUSTOM_ADOPTIUM) {
         if (jvman_json_string_field(json, "\"package\"", "link",
                                     download_url, url_size) != 0 ||
             jvman_json_string_field(json, "\"package\"", "checksum",
@@ -671,4 +798,37 @@ int jvman_download_source_parse_package(
     } else {
         return -1;
     }
+}
+
+int jvman_download_source_rewrite_package_url(
+    const JvmanDownloadSource *source, int major, const char *os,
+    const char *architecture, const char *original_url,
+    char *out, size_t out_size) {
+    const char *filename;
+    const char *cursor;
+    int written;
+    if (!source || major < 8 || !os || !*os || !architecture ||
+        !*architecture || !original_url || !out || out_size == 0) {
+        return -1;
+    }
+    if (source->kind != JVMAN_DOWNLOAD_SOURCE_TSINGHUA) {
+        size_t length = strlen(original_url);
+        if (length >= out_size) return -1;
+        memcpy(out, original_url, length + 1);
+        return 0;
+    }
+    filename = strrchr(original_url, '/');
+    if (!filename || !filename[1]) return -1;
+    ++filename;
+    for (cursor = filename; *cursor; ++cursor) {
+        if (!isalnum((unsigned char)*cursor) && *cursor != '.' &&
+            *cursor != '_' && *cursor != '-' && *cursor != '+') {
+            return -1;
+        }
+    }
+    written = snprintf(
+        out, out_size,
+        "https://mirrors.tuna.tsinghua.edu.cn/Adoptium/%d/jdk/%s/%s/%s",
+        major, architecture, os, filename);
+    return written >= 0 && (size_t)written < out_size ? 0 : -1;
 }

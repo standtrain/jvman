@@ -9,6 +9,7 @@ typedef struct JvmanContext {
     char jdks[JVMAN_PATH_MAX];
     char cache[JVMAN_PATH_MAX];
     char staging[JVMAN_PATH_MAX];
+    char sources[JVMAN_PATH_MAX];
     char current_link[JVMAN_PATH_MAX];
     char current_state[JVMAN_PATH_MAX];
     char download_source[JVMAN_PATH_MAX];

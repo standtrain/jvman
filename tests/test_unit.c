@@ -148,6 +148,18 @@ static void test_download_sources(void) {
         jvman_download_source_find("adoptium");
     const JvmanDownloadSource *foojay =
         jvman_download_source_find("foojay");
+    const JvmanDownloadSource *tsinghua =
+        jvman_download_source_find("tsinghua");
+    const JvmanDownloadSource *huawei =
+        jvman_download_source_find("huawei");
+    const JvmanDownloadSource *aliyun =
+        jvman_download_source_find("aliyun");
+    JvmanDownloadSource custom = {
+        "company", "Custom: company",
+        JVMAN_DOWNLOAD_SOURCE_CUSTOM_ADOPTIUM,
+        NULL,
+        "https://jdk.example.test/v3/{major}?os={os}&arch={arch}&ext={archive}"
+    };
     char url[2048];
     char parsed_url[256];
     char parsed_checksum[65];
@@ -162,8 +174,9 @@ static void test_download_sources(void) {
     CHECK(automatic != NULL &&
           automatic->kind == JVMAN_DOWNLOAD_SOURCE_AUTO);
     CHECK(foojay != NULL);
-    CHECK(jvman_download_source_count() == 3);
-    CHECK(jvman_download_source_at(3) == NULL);
+    CHECK(jvman_download_source_count() == 6);
+    CHECK(jvman_download_source_at(6) == NULL);
+    CHECK(tsinghua != NULL && huawei != NULL && aliyun != NULL);
     CHECK(jvman_download_source_find("FOOJAY") == NULL);
     CHECK(jvman_download_source_find("../foojay") == NULL);
     CHECK(platform_monotonic_millis(&started) == 0);
@@ -172,6 +185,42 @@ static void test_download_sources(void) {
     CHECK(jvman_download_source_build_metadata_url(
               automatic, 21, "windows", "x64", ".zip",
               url, sizeof(url)) != 0);
+    CHECK(jvman_download_source_build_metadata_url(
+              huawei, 21, "linux", "x64", ".tar.gz",
+              url, sizeof(url)) == 0);
+    CHECK(strstr(url, "distribution=bisheng") != NULL);
+    CHECK(jvman_download_source_build_metadata_url(
+              aliyun, 17, "linux", "aarch64", ".tar.gz",
+              url, sizeof(url)) == 0);
+    CHECK(strstr(url, "distribution=dragonwell") != NULL);
+    CHECK(jvman_download_source_valid_custom_template(
+              custom.metadata_template));
+    CHECK(!jvman_download_source_valid_custom_template(
+              "http://jdk.example.test/{major}"));
+    CHECK(!jvman_download_source_valid_custom_template(
+              "https://jdk.example.test/latest"));
+    CHECK(!jvman_download_source_valid_custom_template(
+              "https://user@jdk.example.test/{major}"));
+    CHECK(!jvman_download_source_valid_custom_template(
+              "https://jdk.example.test\\bad/{major}"));
+    CHECK(!jvman_download_source_valid_custom_template(
+              "https://jdk.example.test/{unknown}/{major}"));
+    CHECK(jvman_download_source_build_metadata_url(
+              &custom, 21, "windows", "x64", ".zip",
+              url, sizeof(url)) == 0);
+    CHECK(strcmp(url,
+                 "https://jdk.example.test/v3/21?os=windows&arch=x64&ext=.zip") == 0);
+    CHECK(jvman_download_source_build_metadata_url(
+              &custom, 21, "windows", "x64", ".zip",
+              url, 8) != 0);
+    CHECK(jvman_download_source_rewrite_package_url(
+              tsinghua, 21, "windows", "x64",
+              "https://github.com/adoptium/temurin21-binaries/releases/download/"
+              "jdk-21.0.11%2B10/OpenJDK21U-jdk_x64_windows_hotspot_21.0.11_10.zip",
+              url, sizeof(url)) == 0);
+    CHECK(strcmp(url,
+                 "https://mirrors.tuna.tsinghua.edu.cn/Adoptium/21/jdk/x64/windows/"
+                 "OpenJDK21U-jdk_x64_windows_hotspot_21.0.11_10.zip") == 0);
     probes[0].source = adoptium;
     probes[0].elapsed_millis = 80;
     probes[0].available = 1;

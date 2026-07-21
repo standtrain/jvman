@@ -20,7 +20,7 @@ after an explicit choice.
 
 ## Features
 
-- Automatically benchmark the Adoptium and Foojay APIs before downloading Temurin.
+- Automatically benchmark global and China-friendly JDK sources before downloading.
 - Verify remote archives with the SHA-256 published by the selected source.
 - Install from a local archive for offline use.
 - Register an existing JDK without copying it.
@@ -133,8 +133,11 @@ jvman install 21
 
 # Automatic source selection is the default; fixed sources remain available.
 jvman source auto
-jvman source foojay
+jvman source tsinghua
 jvman install 17 --source adoptium
+
+# Add an Adoptium-compatible custom metadata endpoint.
+jvman source add company 'https://jdk.example.com/v3/{major}?os={os}&arch={arch}'
 
 # Or register a JDK that already exists.
 jvman add oracle-23 'C:\Program Files\Java\jdk-23'
@@ -170,6 +173,8 @@ junction and the next Java process sees the new JDK immediately.
 jvman install <major> [--name <name>] [--sha256 <hex>] [--source <name>]
 jvman install <name> --archive <file> [--sha256 <hex>]
 jvman source [--list|--reset|<name>]
+jvman source add <name> <HTTPS-template>
+jvman source remove <name>
 jvman add <name> <jdk-home>
 jvman discover [--register]
 jvman use <name>
@@ -186,15 +191,27 @@ jvman home
 
 Aliases: `ls` for `list`, `default` for `use`, and `uninstall` for `remove`.
 
-`jvman source` prints the active mode. `jvman source --list` lists `auto`,
-`adoptium`, and `foojay`; `jvman source <name>` persists a selection, and
-`--reset` restores automatic selection. An install-level `--source` only
-overrides that invocation. In `auto` mode, each install measures the complete
-metadata and checksum resolution time for every source, ignores unavailable
-sources, and downloads the JDK once from the fastest successful result. This
-does not download sample JDK data during the benchmark. Source names are
-restricted to the built-in list; metadata and package URLs must use HTTPS, and
-every remote package must include and match a SHA-256 checksum.
+`jvman source` prints the active mode. The built-in sources are `tsinghua`
+(TUNA Adoptium mirror), `huawei` (BiSheng), `aliyun` (Dragonwell), `adoptium`,
+and `foojay`; `auto` benchmarks all available built-in and custom sources.
+`jvman source <name>` persists a selection, and `--reset` restores automatic
+selection. An install-level `--source` only overrides that invocation.
+
+Custom sources use an Adoptium-compatible JSON response containing an HTTPS
+package URL and SHA-256 checksum. Add one with `jvman source add <name>
+<HTTPS-template>`; supported placeholders are `{major}`, `{os}`, `{arch}`, and
+`{archive}`. The template must contain `{major}`, cannot contain URL credentials,
+and is stored in `<data-home>/sources/<name>.conf` with private permissions.
+Select another source before removing an active custom source. Do not place API
+keys or other credentials in source URLs.
+
+In `auto` mode, each install measures the complete metadata and checksum
+resolution time for every source with a short timeout, ignores unavailable
+sources, and downloads the JDK once from the fastest successful result. The
+Tsinghua source also checks the TUNA mirror itself before it can be selected.
+The benchmark does not download sample JDK archives. Metadata and package URLs
+must use HTTPS, and every remote package must include and match a SHA-256
+checksum.
 
 Examples:
 
@@ -303,6 +320,7 @@ jvman/
   staging/           incomplete installs, never activated
   versions/*.conf    registered name -> JAVA_HOME records
   source.conf        selected remote source mode (absent means auto)
+  sources/*.conf     custom Adoptium-compatible source definitions
   current            junction/symlink to the selected JDK
   current.version    selected registration name
   state.lock         cross-process mutation lock
@@ -331,8 +349,9 @@ No source code is copied from those projects.
 
 ## Current Scope
 
-Version `0.2.0` automatically selects between the Adoptium and Foojay catalogs
-and accepts a Java major version for remote installs. Local discovery recognizes
+Version `0.2.0` automatically selects between built-in global, Tsinghua, Huawei,
+Aliyun, and custom catalogs and accepts a Java major version for remote installs.
+Local discovery recognizes
 common JDK vendors, but multi-vendor JDK selection, managed JREs, EA builds, semantic
 version ranges, project `.java-version` files, signed release manifests, and
 automatic CLI edits to persistent environment settings are intentionally deferred.

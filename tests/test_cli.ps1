@@ -216,7 +216,10 @@ try {
     $sourceList = (Invoke-Jvman source --list) -join "`n"
     if ($sourceList -notmatch '(?m)^\* foojay' -or
         $sourceList -notmatch '(?m)^  auto' -or
-        $sourceList -notmatch '(?m)^  adoptium') {
+        $sourceList -notmatch '(?m)^  adoptium' -or
+        $sourceList -notmatch '(?m)^  tsinghua' -or
+        $sourceList -notmatch '(?m)^  huawei' -or
+        $sourceList -notmatch '(?m)^  aliyun') {
         throw 'download source list did not mark the active source'
     }
     Invoke-JvmanExpectFailure install 21 --source unknown
@@ -229,6 +232,46 @@ try {
     if ((Invoke-Jvman source).Trim() -ne 'auto' -or
         (Test-Path -LiteralPath (Join-Path $stateRoot 'source.conf'))) {
         throw 'download source reset did not restore the default'
+    }
+    Invoke-JvmanExpectFailure source add insecure 'http://example.test/{major}'
+    Invoke-JvmanExpectFailure source add incomplete 'https://example.test/latest'
+    Invoke-JvmanExpectFailure source add adoptium 'https://example.test/{major}'
+    $customTemplate = 'https://jdk.example.test/v3/{major}?os={os}&arch={arch}&ext={archive}'
+    Invoke-Jvman source add company $customTemplate | Out-Null
+    $customList = (Invoke-Jvman source --list) -join "`n"
+    if ($customList -notmatch '(?m)^  company\s+Custom: company') {
+        throw 'custom download source was not listed'
+    }
+    Invoke-Jvman source company | Out-Null
+    if ((Invoke-Jvman source).Trim() -ne 'company') {
+        throw 'custom download source could not be selected'
+    }
+    Invoke-JvmanExpectFailure source remove company
+    Invoke-Jvman source auto | Out-Null
+    Invoke-Jvman source remove company | Out-Null
+    if (Test-Path -LiteralPath (Join-Path $stateRoot 'sources\company.conf')) {
+        throw 'custom download source configuration was not removed'
+    }
+    $brokenSource = Join-Path $stateRoot 'sources\broken.conf'
+    Set-Content -LiteralPath $brokenSource -Encoding ASCII -Value 'invalid=true'
+    Invoke-JvmanExpectFailure source --list
+    Invoke-Jvman source remove broken | Out-Null
+    if (Test-Path -LiteralPath $brokenSource) {
+        throw 'invalid custom source could not be removed for recovery'
+    }
+    0..31 | ForEach-Object {
+        $limitSource = Join-Path $stateRoot ("sources\\limit{0}.conf" -f $_)
+        Set-Content -LiteralPath $limitSource -Encoding ASCII -Value @(
+            'type=adoptium'
+            ("url=https://limit{0}.example.test/{{major}}" -f $_)
+        )
+    }
+    Invoke-JvmanExpectFailure source add overflow 'https://overflow.example.test/{major}'
+    if (Test-Path -LiteralPath (Join-Path $stateRoot 'sources\overflow.conf')) {
+        throw 'custom source limit failure still created a configuration'
+    }
+    0..31 | ForEach-Object {
+        Remove-Item -LiteralPath (Join-Path $stateRoot ("sources\\limit{0}.conf" -f $_))
     }
 
     Invoke-Jvman add $discoveryName $nameConflict | Out-Null

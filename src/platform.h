@@ -43,6 +43,9 @@ int platform_read_file_limited(const char *path, size_t limit,
                                char **data_out, size_t *size_out);
 int platform_https_download(const char *url, const char *destination,
                             size_t limit, int show_progress);
+int platform_https_download_timeout(const char *url, const char *destination,
+                                    size_t limit, int show_progress,
+                                    unsigned int timeout_seconds);
 int platform_current_executable(char *out, size_t out_size);
 int platform_sha256_file(const char *path, unsigned char digest[32]);
 int platform_validate_executable_image(const char *path);

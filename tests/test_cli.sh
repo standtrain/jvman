@@ -110,6 +110,9 @@ fi
 test "$("$binary" source)" = foojay
 grep -Fx foojay "$state_root/source.conf" >/dev/null
 "$binary" source --list | grep -E '^\* foojay' >/dev/null
+"$binary" source --list | grep -E '^  tsinghua' >/dev/null
+"$binary" source --list | grep -E '^  huawei' >/dev/null
+"$binary" source --list | grep -E '^  aliyun' >/dev/null
 if "$binary" install 21 --source unknown >/dev/null 2>&1; then
     echo 'install accepted an unknown source' >&2
     exit 1
@@ -120,6 +123,45 @@ grep -Fx auto "$state_root/source.conf" >/dev/null
 "$binary" source --reset
 test "$("$binary" source)" = auto
 test ! -e "$state_root/source.conf"
+if "$binary" source add insecure 'http://example.test/{major}' >/dev/null 2>&1 ||
+   "$binary" source add incomplete 'https://example.test/latest' >/dev/null 2>&1 ||
+   "$binary" source add adoptium 'https://example.test/{major}' >/dev/null 2>&1; then
+    echo 'source add accepted an invalid custom source' >&2
+    exit 1
+fi
+custom_template='https://jdk.example.test/v3/{major}?os={os}&arch={arch}&ext={archive}'
+"$binary" source add company "$custom_template"
+"$binary" source --list | grep -E '^  company[[:space:]]+Custom: company' >/dev/null
+test "$(stat -c '%a' "$state_root/sources/company.conf")" = 600
+"$binary" source company
+test "$("$binary" source)" = company
+if "$binary" source remove company >/dev/null 2>&1; then
+    echo 'source remove removed the active custom source' >&2
+    exit 1
+fi
+"$binary" source auto
+"$binary" source remove company
+test ! -e "$state_root/sources/company.conf"
+printf 'invalid=true\n' > "$state_root/sources/broken.conf"
+if "$binary" source --list >/dev/null 2>&1; then
+    echo 'source list accepted a malformed custom source' >&2
+    exit 1
+fi
+"$binary" source remove broken
+test ! -e "$state_root/sources/broken.conf"
+limit_index=0
+while test "$limit_index" -lt 32; do
+    printf 'type=adoptium\nurl=https://limit%s.example.test/{major}\n' \
+        "$limit_index" > "$state_root/sources/limit${limit_index}.conf"
+    limit_index=$((limit_index + 1))
+done
+if "$binary" source add overflow 'https://overflow.example.test/{major}' \
+        >/dev/null 2>&1; then
+    echo 'source add exceeded the custom source limit' >&2
+    exit 1
+fi
+test ! -e "$state_root/sources/overflow.conf"
+rm "$state_root"/sources/limit*.conf
 
 "$binary" add "$discovery_name" "$name_conflict"
 "$binary" add manual-discovered "$discovered_a"

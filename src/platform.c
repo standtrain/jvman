@@ -1897,7 +1897,7 @@ int platform_sha256_file(const char *path, unsigned char digest[32]) {
 
 #if defined(_WIN32)
 static int windows_https_download(const char *url, const char *destination,
-                                  size_t limit) {
+                                  size_t limit, unsigned int timeout_seconds) {
     WCHAR *wide_url = NULL;
     WCHAR *wide_destination = NULL;
     URL_COMPONENTSW components;
@@ -1911,6 +1911,9 @@ static int windows_https_download(const char *url, const char *destination,
     DWORD status_size = sizeof(status);
     DWORD redirect_policy =
         WINHTTP_OPTION_REDIRECT_POLICY_DISALLOW_HTTPS_TO_HTTP;
+    DWORD timeout_millis = timeout_seconds * 1000u;
+    DWORD phase_timeout = timeout_millis < 30000u
+                              ? timeout_millis : 30000u;
     BY_HANDLE_FILE_INFORMATION output_info;
     size_t resource_length;
     uint64_t total = 0;
@@ -2000,7 +2003,8 @@ static int windows_https_download(const char *url, const char *destination,
         platform_set_windows_error("cannot initialize Windows HTTPS");
         goto done;
     }
-    if (!WinHttpSetTimeouts(session, 30000, 30000, 30000, 300000)) {
+    if (!WinHttpSetTimeouts(session, phase_timeout, phase_timeout,
+                            phase_timeout, timeout_millis)) {
         platform_set_windows_error("cannot set HTTPS timeouts");
         goto done;
     }
@@ -2072,19 +2076,23 @@ done:
 }
 #endif
 
-int platform_https_download(const char *url, const char *destination,
-                            size_t limit, int show_progress) {
+int platform_https_download_timeout(const char *url, const char *destination,
+                                    size_t limit, int show_progress,
+                                    unsigned int timeout_seconds) {
     if (!url || !destination || limit == 0 ||
+        timeout_seconds == 0 || timeout_seconds > 300u ||
         strncmp(url, "https://", 8) != 0) {
         platform_set_error("invalid HTTPS download request");
         return -1;
     }
 #if defined(_WIN32)
     (void)show_progress;
-    return windows_https_download(url, destination, limit);
+    return windows_https_download(url, destination, limit, timeout_seconds);
 #else
     char downloader[JVMAN_PATH_MAX];
     char limit_text[32];
+    char timeout_text[16];
+    char connect_timeout_text[16];
     char *arguments[32];
     unsigned char buffer[64u * 1024u];
     struct stat path_info;
@@ -2095,13 +2103,24 @@ int platform_https_download(const char *url, const char *destination,
     int path_existed = 0;
     int index = 0;
     int written;
+    int timeout_written;
+    int connect_timeout_written;
     int status = 0;
     int child_waited = 0;
     int failed = 0;
     size_t total = 0;
     pid_t child = -1;
     written = snprintf(limit_text, sizeof(limit_text), "%zu", limit);
+    timeout_written = snprintf(timeout_text, sizeof(timeout_text), "%u",
+                               timeout_seconds);
+    connect_timeout_written = snprintf(
+        connect_timeout_text, sizeof(connect_timeout_text), "%u",
+        timeout_seconds < 30u ? timeout_seconds : 30u);
     if (written < 0 || (size_t)written >= sizeof(limit_text) ||
+        timeout_written < 0 ||
+        (size_t)timeout_written >= sizeof(timeout_text) ||
+        connect_timeout_written < 0 ||
+        (size_t)connect_timeout_written >= sizeof(connect_timeout_text) ||
         platform_find_trusted_executable("curl", downloader,
                                          sizeof(downloader)) != 0) {
         platform_set_error("trusted curl executable is not available");
@@ -2119,9 +2138,9 @@ int platform_https_download(const char *url, const char *destination,
     arguments[index++] = "--header";
     arguments[index++] = "User-Agent: jvman/" JVMAN_VERSION;
     arguments[index++] = "--connect-timeout";
-    arguments[index++] = "30";
+    arguments[index++] = connect_timeout_text;
     arguments[index++] = "--max-time";
-    arguments[index++] = "300";
+    arguments[index++] = timeout_text;
     arguments[index++] = "--proto";
     arguments[index++] = "=https";
     arguments[index++] = "--proto-redir";
@@ -2257,6 +2276,12 @@ int platform_https_download(const char *url, const char *destination,
     }
     return failed ? -1 : 0;
 #endif
+}
+
+int platform_https_download(const char *url, const char *destination,
+                            size_t limit, int show_progress) {
+    return platform_https_download_timeout(url, destination, limit,
+                                           show_progress, 300u);
 }
 
 static int platform_read_exact_at(const char *path, uint64_t offset,

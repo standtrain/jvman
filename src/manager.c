@@ -14,8 +14,21 @@
 #include <string.h>
 
 #define JVMAN_METADATA_LIMIT (1024u * 1024u)
+#define JVMAN_SOURCE_HEALTH_LIMIT (512u * 1024u)
 #define JVMAN_JDK_ARCHIVE_LIMIT ((size_t)1024u * 1024u * 1024u)
-#define JVMAN_DOWNLOAD_SOURCE_LIMIT 8u
+#define JVMAN_DOWNLOAD_SOURCE_LIMIT 64u
+#define JVMAN_CUSTOM_SOURCE_LIMIT 32u
+#define JVMAN_SOURCE_TEMPLATE_MAX 2048u
+
+typedef struct DownloadSourceRegistry {
+    const JvmanDownloadSource *items[JVMAN_DOWNLOAD_SOURCE_LIMIT];
+    JvmanDownloadSource custom[JVMAN_CUSTOM_SOURCE_LIMIT];
+    char names[JVMAN_CUSTOM_SOURCE_LIMIT][JVMAN_NAME_MAX + 1];
+    char labels[JVMAN_CUSTOM_SOURCE_LIMIT][JVMAN_NAME_MAX + 16];
+    char templates[JVMAN_CUSTOM_SOURCE_LIMIT][JVMAN_SOURCE_TEMPLATE_MAX];
+    size_t count;
+    size_t custom_count;
+} DownloadSourceRegistry;
 
 static int print_error(const char *message) {
     fprintf(stderr, "jvman: %s\n", message);
@@ -41,6 +54,8 @@ int jvman_context_init(JvmanContext *context) {
                         "cache") != 0 ||
         jvman_path_join(context->staging, sizeof(context->staging), context->root,
                         "staging") != 0 ||
+        jvman_path_join(context->sources, sizeof(context->sources), context->root,
+                        "sources") != 0 ||
         jvman_path_join(context->current_link, sizeof(context->current_link), context->root,
                         "current") != 0 ||
         jvman_path_join(context->current_state, sizeof(context->current_state), context->root,
@@ -59,7 +74,8 @@ static int prepare_layout(const JvmanContext *context) {
         platform_mkdirs(context->versions) != 0 ||
         platform_mkdirs(context->jdks) != 0 ||
         platform_mkdirs(context->cache) != 0 ||
-        platform_mkdirs(context->staging) != 0) {
+        platform_mkdirs(context->staging) != 0 ||
+        platform_mkdirs(context->sources) != 0) {
         return -1;
     }
     return 0;
@@ -902,14 +918,159 @@ static char *read_file_bounded(const char *path, size_t limit) {
     return data;
 }
 
-static int read_download_source(const JvmanContext *context,
-                                const JvmanDownloadSource **source_out) {
+static int source_entry_compare(const void *left, const void *right) {
+    const char *const *left_name = (const char *const *)left;
+    const char *const *right_name = (const char *const *)right;
+    return strcmp(*left_name, *right_name);
+}
+
+static int custom_source_config_path(const JvmanContext *context,
+                                     const char *name,
+                                     char *out, size_t out_size) {
+    char filename[JVMAN_NAME_MAX + 8];
+    if (!context || !jvman_valid_name(name) ||
+        snprintf(filename, sizeof(filename), "%s.conf", name) >=
+            (int)sizeof(filename)) {
+        return -1;
+    }
+    return jvman_path_join(out, out_size, context->sources, filename);
+}
+
+static int parse_custom_source_config(char *text,
+                                      char *url_template,
+                                      size_t template_size) {
+    char *cursor = text;
+    int found_type = 0;
+    int found_url = 0;
+    if (!text || !url_template || template_size == 0) return -1;
+    while (*cursor) {
+        char *line = cursor;
+        char *newline = strchr(cursor, '\n');
+        size_t length;
+        if (newline) {
+            *newline = '\0';
+            cursor = newline + 1;
+        } else {
+            cursor += strlen(cursor);
+        }
+        length = strlen(line);
+        if (length && line[length - 1] == '\r') line[--length] = '\0';
+        if (length == 0) return -1;
+        if (strcmp(line, "type=adoptium") == 0) {
+            if (found_type) return -1;
+            found_type = 1;
+        } else if (strncmp(line, "url=", 4) == 0) {
+            const char *value = line + 4;
+            if (found_url || strlen(value) >= template_size ||
+                !jvman_download_source_valid_custom_template(value)) {
+                return -1;
+            }
+            strcpy(url_template, value);
+            found_url = 1;
+        } else {
+            return -1;
+        }
+    }
+    return found_type && found_url ? 0 : -1;
+}
+
+static const JvmanDownloadSource *download_source_registry_find(
+    const DownloadSourceRegistry *registry, const char *name);
+
+static int download_source_registry_load(const JvmanContext *context,
+                                         DownloadSourceRegistry *registry) {
+    char **entries = NULL;
+    size_t entry_count = 0;
+    size_t i;
+    if (!context || !registry) return -1;
+    memset(registry, 0, sizeof(*registry));
+    for (i = 0; i < jvman_download_source_count(); ++i) {
+        const JvmanDownloadSource *source = jvman_download_source_at(i);
+        if (!source || registry->count >= JVMAN_DOWNLOAD_SOURCE_LIMIT) return -1;
+        registry->items[registry->count++] = source;
+    }
+    if (!platform_path_exists(context->sources)) return 0;
+    if (!platform_is_directory(context->sources) ||
+        platform_list_directory(context->sources, &entries,
+                                &entry_count) != 0) {
+        return -1;
+    }
+    qsort(entries, entry_count, sizeof(*entries), source_entry_compare);
+    for (i = 0; i < entry_count; ++i) {
+        char path[JVMAN_PATH_MAX];
+        char name[JVMAN_NAME_MAX + 1];
+        char *text;
+        size_t filename_length;
+        size_t name_length;
+        size_t index;
+        JvmanDownloadSource *source;
+        if (!jvman_ends_with(entries[i], ".conf")) continue;
+        filename_length = strlen(entries[i]);
+        name_length = filename_length - 5;
+        if (name_length == 0 || name_length > JVMAN_NAME_MAX) goto invalid;
+        memcpy(name, entries[i], name_length);
+        name[name_length] = '\0';
+        if (!jvman_valid_name(name) ||
+            download_source_registry_find(registry, name) != NULL ||
+            registry->custom_count >= JVMAN_CUSTOM_SOURCE_LIMIT ||
+            registry->count >= JVMAN_DOWNLOAD_SOURCE_LIMIT ||
+            jvman_path_join(path, sizeof(path), context->sources,
+                            entries[i]) != 0 ||
+            !platform_is_file(path) ||
+            !(text = read_file_bounded(path, JVMAN_SOURCE_TEMPLATE_MAX + 128u))) {
+            goto invalid;
+        }
+        index = registry->custom_count;
+        if (parse_custom_source_config(
+                text, registry->templates[index],
+                sizeof(registry->templates[index])) != 0) {
+            free(text);
+            goto invalid;
+        }
+        free(text);
+        strcpy(registry->names[index], name);
+        if (snprintf(registry->labels[index], sizeof(registry->labels[index]),
+                     "Custom: %s", name) >=
+            (int)sizeof(registry->labels[index])) {
+            goto invalid;
+        }
+        source = &registry->custom[index];
+        source->name = registry->names[index];
+        source->label = registry->labels[index];
+        source->kind = JVMAN_DOWNLOAD_SOURCE_CUSTOM_ADOPTIUM;
+        source->distribution = NULL;
+        source->metadata_template = registry->templates[index];
+        registry->items[registry->count++] = source;
+        ++registry->custom_count;
+    }
+    platform_free_directory_list(entries, entry_count);
+    return 0;
+invalid:
+    platform_free_directory_list(entries, entry_count);
+    return -1;
+}
+
+static const JvmanDownloadSource *download_source_registry_find(
+    const DownloadSourceRegistry *registry, const char *name) {
+    size_t i;
+    if (!registry || !name || !*name) return NULL;
+    for (i = 0; i < registry->count; ++i) {
+        if (strcmp(registry->items[i]->name, name) == 0) {
+            return registry->items[i];
+        }
+    }
+    return NULL;
+}
+
+static int read_download_source_name(const JvmanContext *context,
+                                     char *out, size_t out_size) {
     char *name = NULL;
-    size_t name_size = 0;
-    const JvmanDownloadSource *source;
-    if (!context || !source_out) return -1;
+    size_t name_size;
+    if (!context || !out || out_size == 0) return -1;
     if (!platform_path_exists(context->download_source)) {
-        *source_out = jvman_download_source_default();
+        const char *default_name = jvman_download_source_default()->name;
+        if (strlen(default_name) >= out_size) return -1;
+        strcpy(out, default_name);
         return 0;
     }
     if (!platform_is_file(context->download_source) ||
@@ -921,56 +1082,148 @@ static int read_download_source(const JvmanContext *context,
                          name[name_size - 1] == '\n')) {
         name[--name_size] = '\0';
     }
-    if (name_size == 0 || strchr(name, '\r') || strchr(name, '\n')) {
+    if (name_size == 0 || name_size >= out_size || strchr(name, '\r') ||
+        strchr(name, '\n')) {
         free(name);
         return -1;
     }
-    source = jvman_download_source_find(name);
+    strcpy(out, name);
     free(name);
+    return 0;
+}
+
+static int read_download_source(const JvmanContext *context,
+                                const DownloadSourceRegistry *registry,
+                                const JvmanDownloadSource **source_out) {
+    char name[JVMAN_NAME_MAX + 1];
+    const JvmanDownloadSource *source;
+    if (!context || !registry || !source_out) return -1;
+    if (read_download_source_name(context, name, sizeof(name)) != 0) return -1;
+    source = download_source_registry_find(registry, name);
     if (!source) return -1;
     *source_out = source;
     return 0;
 }
 
 static int command_source(const JvmanContext *context, int argc, char **argv) {
+    DownloadSourceRegistry registry;
     const JvmanDownloadSource *active;
     const JvmanDownloadSource *selected;
     PlatformLock lock;
     size_t i;
     int result = 1;
+    if (argc == 3 && strcmp(argv[2], "--reset") == 0) {
+        selected = jvman_download_source_default();
+        if (acquire_lock(context, &lock) != 0) {
+            return print_platform_error("cannot lock state");
+        }
+        if (platform_path_exists(context->download_source) &&
+            platform_remove_file(context->download_source) != 0) {
+            print_platform_error("cannot reset download source");
+            goto done;
+        }
+        printf("Download source: %s (%s)\n", selected->name, selected->label);
+        result = 0;
+        goto done;
+    }
+    if (argc == 4 && strcmp(argv[2], "remove") == 0) {
+        char path[JVMAN_PATH_MAX];
+        char active_name[JVMAN_NAME_MAX + 1];
+        const char *name = argv[3];
+        if (!jvman_valid_name(name) || jvman_download_source_find(name) ||
+            custom_source_config_path(context, name, path, sizeof(path)) != 0 ||
+            !platform_is_file(path)) {
+            return print_error("only an existing custom source can be removed");
+        }
+        if (read_download_source_name(context, active_name,
+                                      sizeof(active_name)) != 0) {
+            return print_error("download source configuration is invalid");
+        }
+        if (strcmp(active_name, name) == 0) {
+            return print_error("select another source before removing the active custom source");
+        }
+        if (acquire_lock(context, &lock) != 0) {
+            return print_platform_error("cannot lock state");
+        }
+        if (platform_remove_file(path) != 0) {
+            print_platform_error("cannot remove custom download source");
+            goto done;
+        }
+        printf("Removed custom download source: %s\n", name);
+        result = 0;
+        goto done;
+    }
+    if (download_source_registry_load(context, &registry) != 0) {
+        return print_error("custom download source configuration is invalid");
+    }
+    if (argc == 5 && strcmp(argv[2], "add") == 0) {
+        char path[JVMAN_PATH_MAX];
+        char *content;
+        size_t content_size;
+        const char *name = argv[3];
+        const char *url_template = argv[4];
+        if (!jvman_valid_name(name) ||
+            download_source_registry_find(&registry, name) != NULL) {
+            return print_error("custom source name is invalid or already exists");
+        }
+        if (registry.custom_count >= JVMAN_CUSTOM_SOURCE_LIMIT ||
+            registry.count >= JVMAN_DOWNLOAD_SOURCE_LIMIT) {
+            return print_error("custom download source limit reached");
+        }
+        if (!jvman_download_source_valid_custom_template(url_template)) {
+            return print_error(
+                "custom source URL must be HTTPS and include {major}; supported placeholders are {major}, {os}, {arch}, and {archive}");
+        }
+        content_size = strlen(url_template) + 32;
+        content = (char *)malloc(content_size);
+        if (!content ||
+            snprintf(content, content_size, "type=adoptium\nurl=%s\n",
+                     url_template) >= (int)content_size) {
+            free(content);
+            return print_error("custom source configuration is too large");
+        }
+        if (acquire_lock(context, &lock) != 0) {
+            free(content);
+            return print_platform_error("cannot lock state");
+        }
+        if (custom_source_config_path(context, name, path, sizeof(path)) != 0 ||
+            platform_path_exists(path) ||
+            platform_write_text_atomic(path, content) != 0) {
+            free(content);
+            print_platform_error("cannot save custom download source");
+            goto done;
+        }
+        free(content);
+        printf("Added custom download source: %s\n", name);
+        result = 0;
+        goto done;
+    }
     if (argc == 2) {
-        if (read_download_source(context, &active) != 0) {
+        if (read_download_source(context, &registry, &active) != 0) {
             return print_error("download source configuration is invalid");
         }
         puts(active->name);
         return 0;
     }
     if (argc == 3 && strcmp(argv[2], "--list") == 0) {
-        if (read_download_source(context, &active) != 0) {
+        if (read_download_source(context, &registry, &active) != 0) {
             return print_error("download source configuration is invalid");
         }
-        for (i = 0; i < jvman_download_source_count(); ++i) {
-            const JvmanDownloadSource *item = jvman_download_source_at(i);
-            printf("%c %-10s %s\n", item == active ? '*' : ' ',
+        for (i = 0; i < registry.count; ++i) {
+            const JvmanDownloadSource *item = registry.items[i];
+            printf("%c %-12s %s\n", item == active ? '*' : ' ',
                    item->name, item->label);
         }
         return 0;
     }
     if (argc != 3) {
-        return print_error("usage: jvman source [--list|--reset|<name>]");
+        return print_error(
+            "usage: jvman source [--list|--reset|<name>|add <name> <HTTPS-template>|remove <name>]");
     }
-    selected = strcmp(argv[2], "--reset") == 0
-                   ? jvman_download_source_default()
-                   : jvman_download_source_find(argv[2]);
+    selected = download_source_registry_find(&registry, argv[2]);
     if (!selected) return print_error("unknown download source; use `jvman source --list`");
     if (acquire_lock(context, &lock) != 0) return print_platform_error("cannot lock state");
-    if (strcmp(argv[2], "--reset") == 0) {
-        if (platform_path_exists(context->download_source) &&
-            platform_remove_file(context->download_source) != 0) {
-            print_platform_error("cannot reset download source");
-            goto done;
-        }
-    } else {
+    {
         char content[80];
         if (snprintf(content, sizeof(content), "%s\n", selected->name) >=
                 (int)sizeof(content) ||
@@ -988,9 +1241,12 @@ done:
 
 static int download_file(const char *url, const char *destination,
                          size_t limit, int show_progress);
+static int download_file_timeout(const char *url, const char *destination,
+                                 size_t limit, unsigned int timeout_seconds);
 
 static int resolve_fastest_download_source(
-    int major, const char *metadata_path,
+    const DownloadSourceRegistry *registry, int major,
+    const char *metadata_path,
     const JvmanDownloadSource **selected_out,
     char *download_url, size_t url_size,
     char *checksum, size_t checksum_size,
@@ -1003,13 +1259,23 @@ static int download_metadata(const JvmanDownloadSource *source, int major,
                              char *exact_version, size_t version_size) {
     char metadata_url[2048];
     char detail_url[2048];
+    char original_url[2048];
     char *json = NULL;
     int result;
+    if (source->kind == JVMAN_DOWNLOAD_SOURCE_TSINGHUA) {
+        if (download_file_timeout(
+                "https://mirrors.tuna.tsinghua.edu.cn/Adoptium/",
+                metadata_path, JVMAN_SOURCE_HEALTH_LIMIT, 15u) != 0 ||
+            platform_remove_file(metadata_path) != 0) {
+            return -1;
+        }
+    }
     if (jvman_download_source_build_metadata_url(
             source, major, platform_os_name(), platform_arch_name(),
             platform_archive_extension(), metadata_url,
             sizeof(metadata_url)) != 0 ||
-        download_file(metadata_url, metadata_path, JVMAN_METADATA_LIMIT, 0) != 0 ||
+        download_file_timeout(metadata_url, metadata_path,
+                              JVMAN_METADATA_LIMIT, 15u) != 0 ||
         !(json = read_file_bounded(metadata_path, JVMAN_METADATA_LIMIT))) {
         return -1;
     }
@@ -1020,8 +1286,8 @@ static int download_metadata(const JvmanDownloadSource *source, int major,
         free(json);
         json = NULL;
         if (platform_remove_file(metadata_path) != 0 ||
-            download_file(detail_url, metadata_path,
-                          JVMAN_METADATA_LIMIT, 0) != 0 ||
+            download_file_timeout(detail_url, metadata_path,
+                                  JVMAN_METADATA_LIMIT, 15u) != 0 ||
             !(json = read_file_bounded(metadata_path,
                                        JVMAN_METADATA_LIMIT))) {
             return -1;
@@ -1029,7 +1295,13 @@ static int download_metadata(const JvmanDownloadSource *source, int major,
     }
     if (result == 0) {
         result = jvman_download_source_parse_package(
-            source, json, download_url, url_size, checksum, checksum_size);
+            source, json, original_url, sizeof(original_url),
+            checksum, checksum_size);
+    }
+    if (result == 0) {
+        result = jvman_download_source_rewrite_package_url(
+            source, major, platform_os_name(), platform_arch_name(),
+            original_url, download_url, url_size);
     }
     free(json);
     return result;
@@ -1040,8 +1312,15 @@ static int download_file(const char *url, const char *destination,
     return platform_https_download(url, destination, limit, show_progress);
 }
 
+static int download_file_timeout(const char *url, const char *destination,
+                                 size_t limit, unsigned int timeout_seconds) {
+    return platform_https_download_timeout(url, destination, limit, 0,
+                                           timeout_seconds);
+}
+
 static int resolve_fastest_download_source(
-    int major, const char *metadata_path,
+    const DownloadSourceRegistry *registry, int major,
+    const char *metadata_path,
     const JvmanDownloadSource **selected_out,
     char *download_url, size_t url_size,
     char *checksum, size_t checksum_size,
@@ -1058,16 +1337,16 @@ static int resolve_fastest_download_source(
     ResolvedSource *best_result = NULL;
     size_t resolved_count = 0;
     size_t i;
-    if (!metadata_path || !selected_out || !download_url || url_size == 0 ||
-        !checksum || checksum_size == 0 || !exact_version ||
+    if (!registry || !metadata_path || !selected_out || !download_url ||
+        url_size == 0 || !checksum || checksum_size == 0 || !exact_version ||
         version_size == 0) {
         return -1;
     }
     puts("Testing download sources...");
     fflush(stdout);
-    if (jvman_download_source_count() > JVMAN_DOWNLOAD_SOURCE_LIMIT) return -1;
-    for (i = 0; i < jvman_download_source_count(); ++i) {
-        const JvmanDownloadSource *source = jvman_download_source_at(i);
+    if (registry->count > JVMAN_DOWNLOAD_SOURCE_LIMIT) return -1;
+    for (i = 0; i < registry->count; ++i) {
+        const JvmanDownloadSource *source = registry->items[i];
         ResolvedSource *candidate;
         uint64_t started;
         uint64_t finished;
@@ -1165,6 +1444,7 @@ static int command_install(const JvmanContext *context, const char *version,
     int result = 1;
     PlatformLock lock;
     JvmanRegistration registration;
+    DownloadSourceRegistry source_registry;
     const JvmanDownloadSource *download_source = NULL;
     const char *archive_source = archive;
 
@@ -1189,8 +1469,14 @@ static int command_install(const JvmanContext *context, const char *version,
         return print_error("--source is only valid for remote installs");
     }
     if (remote) {
-        if (source_option) download_source = jvman_download_source_find(source_option);
-        else if (read_download_source(context, &download_source) != 0) {
+        if (download_source_registry_load(context, &source_registry) != 0) {
+            return print_error("custom download source configuration is invalid");
+        }
+        if (source_option) {
+            download_source = download_source_registry_find(
+                &source_registry, source_option);
+        } else if (read_download_source(context, &source_registry,
+                                        &download_source) != 0) {
             return print_error("download source configuration is invalid");
         }
         if (!download_source) {
@@ -1245,7 +1531,8 @@ static int command_install(const JvmanContext *context, const char *version,
                    major, platform_os_name(), platform_arch_name());
             fflush(stdout);
             resolve_result = resolve_fastest_download_source(
-                major, metadata, &download_source, url, sizeof(url),
+                &source_registry, major, metadata, &download_source,
+                url, sizeof(url),
                 checksum, sizeof(checksum), exact_version,
                 sizeof(exact_version));
         } else {
@@ -1354,7 +1641,7 @@ static void print_usage(void) {
     puts("  jvman use <name>");
     puts("  jvman list");
     puts("  jvman discover [--register]");
-    puts("  jvman source [--list|--reset|<name>]");
+    puts("  jvman source [--list|--reset|<name>|add <name> <HTTPS-template>|remove <name>]");
     puts("  jvman current");
     puts("  jvman which [name]");
     puts("  jvman remove <name>");
