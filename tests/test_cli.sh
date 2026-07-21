@@ -207,9 +207,17 @@ make_jdk "$test_root/fixtures/jdk-a"
 make_jdk "$test_root/fixtures/jdk-b"
 "$binary" add a "$test_root/fixtures/jdk-a"
 "$binary" add b "$test_root/fixtures/jdk-b"
-"$binary" use a
+use_output=$("$binary" use a)
+printf '%s\n' "$use_output" | grep -F 'jvman init' >/dev/null
 test "$("$binary" current)" = a
 test -f "$state_root/current/bin/java"
+initialized_use_output=$(PATH="$state_root/current/bin:$PATH" "$binary" use a)
+case $initialized_use_output in
+    *'jvman init'*)
+        echo 'use printed an initialization hint for an initialized shell' >&2
+        exit 1
+        ;;
+esac
 "$binary" exec a -- sh -c 'test "$JAVA_HOME" = "$1"' sh "$test_root/fixtures/jdk-a"
 "$binary" use b
 "$binary" remove a

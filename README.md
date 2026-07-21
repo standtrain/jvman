@@ -82,12 +82,15 @@ built-in language table. `System default` is selected initially and resolves
 from the Windows UI language; English and Simplified Chinese remain available
 as explicit overrides. Canceling the language dialog exits setup.
 
-When started without switches, the installer asks whether to add the program
-directory to `PATH`, whether those PATH entries should be written for only the
-current user or for all users, whether a valid `current` JDK should provide
-`JAVA_HOME` and `current\bin`, and whether to run `jvman discover --register`.
-Existing `PATH` entries are retained and exact or canonical duplicates are not
-added.
+When started without switches, the installer asks whether to enable `PATH`
+integration, whether it should apply to only the current user or all users,
+whether a valid `current` JDK should provide `JAVA_HOME`, and whether to run
+`jvman discover --register`. Current-user PATH integration adds both the
+program directory and the stable `<data-home>\current\bin` directory. The
+stable Java entry is added even before a JDK is selected; later `jvman use`
+commands redirect `current` without another PATH update. System PATH
+integration adds only the program directory. Existing entries are retained and
+exact or canonical duplicates are not added.
 
 The normal command-line switches are:
 
@@ -101,20 +104,34 @@ jvman-setup.exe /HELP
 ```
 
 `/S`, `/SILENT`, and `/QUIET` suppress dialogs. `/ADD_TO_PATH` explicitly
-enables the PATH update. `/USER_PATH` writes PATH entries to the current-user
-environment and is the default; `/SYSTEM_PATH` (also `/MACHINE_PATH` or
-`/ALL_USERS_PATH`) writes PATH entries to the machine environment and requires
-administrator permission. `/NO_PATH` (or `/NO_ADD_TO_PATH`) disables PATH
-updates and removes a PATH entry previously owned by this installer on upgrade.
-`/CONFIGURE_JAVA` is opt-in and requires `<data-home>\current\bin\java.exe`
-and `javac.exe`; without
+enables PATH integration. `/USER_PATH` adds the program directory and stable
+`<data-home>\current\bin` to the current-user environment and is the default.
+`/SYSTEM_PATH` (also `/MACHINE_PATH` or `/ALL_USERS_PATH`) adds only the program
+directory to the machine environment and requires administrator permission; it
+never adds the user-writable JDK directory. `/NO_PATH` (or
+`/NO_ADD_TO_PATH`) disables PATH updates and removes installer-owned program
+and stable Java PATH entries on upgrade. `/CONFIGURE_JAVA` is opt-in,
+configures current-user `JAVA_HOME`, and requires
+`<data-home>\current\bin\java.exe` and `javac.exe`; without
 `/REPLACE_JAVA_HOME`, a different existing `JAVA_HOME` is treated as a conflict
 and is left unchanged. `/DISCOVER` runs discovery only after installation and
-does not select a current JDK. Use a new terminal after an environment update
-so that it receives the broadcast change.
+does not select a current JDK.
 
-`/NO_CONFIGURE_JAVA` disables Java environment configuration; on a repeat
-install it restores any `JAVA_HOME` value previously managed by this installer.
+`/NO_CONFIGURE_JAVA` disables `JAVA_HOME` configuration; on a repeat install it
+restores any `JAVA_HOME` value previously managed by this installer. It does
+not override the separate PATH choice.
+
+Terminals that were already running before installation keep their old process
+environment. Open a new terminal, or initialize the existing one with the
+command for that shell:
+
+```cmd
+for /f "delims=" %L in ('jvman init cmd') do @call %L
+```
+
+```powershell
+jvman init powershell | Invoke-Expression
+```
 
 For unattended provisioning, combine the desired switches with `/S`; a
 non-silent run presents the same choices in the graphical prompts.

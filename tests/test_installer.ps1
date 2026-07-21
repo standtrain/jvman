@@ -30,6 +30,30 @@ function Assert-Equal([object]$Expected, [object]$Actual, [string]$Message) {
     }
 }
 
+function Assert-PathContains(
+    [AllowNull()][string]$PathValue,
+    [string]$Expected,
+    [string]$Message
+) {
+    $expectedPath = [IO.Path]::GetFullPath($Expected).TrimEnd([char[]]@('\', '/'))
+    foreach ($entry in @($PathValue -split ';')) {
+        $candidate = $entry.Trim().Trim('"')
+        if (-not $candidate) { continue }
+        try {
+            $candidate = [Environment]::ExpandEnvironmentVariables($candidate)
+            $candidate = [IO.Path]::GetFullPath($candidate).TrimEnd([char[]]@('\', '/'))
+        }
+        catch {
+            continue
+        }
+        if ([string]::Equals($candidate, $expectedPath,
+                            [StringComparison]::OrdinalIgnoreCase)) {
+            return
+        }
+    }
+    throw "$Message (missing '$Expected')"
+}
+
 $setupPath = Resolve-ExistingFile $Setup 'Setup'
 $binaryPath = Resolve-ExistingFile $Binary 'Payload binary'
 $root = Join-Path ([IO.Path]::GetTempPath()) ("jvman-installer-test-" + [guid]::NewGuid().ToString('N'))
@@ -105,10 +129,17 @@ try {
         $regularUninstaller = Join-Path $regularInstallDir 'uninstall.exe'
         [Environment]::SetEnvironmentVariable('JVMAN_HOME', $regularDataDir, 'Process')
         try {
-            $regularArguments = @('/S', '/NO_PATH', "/DIR=`"$regularInstallDir`"")
+            $regularArguments = @('/S', '/ADD_TO_PATH', '/USER_PATH', "/DIR=`"$regularInstallDir`"")
             Assert-Equal 0 (Invoke-GuiProcess $setupPath $regularArguments) 'Regular install failed'
             if (-not (Test-Path -LiteralPath $regularUninstaller -PathType Leaf)) {
                 throw "Regular install did not create $regularUninstaller"
+            }
+            $installedUserPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+            $stableJavaBin = Join-Path $regularDataDir 'current\bin'
+            Assert-PathContains $installedUserPath $regularInstallDir 'Regular install did not add its program directory to user PATH'
+            Assert-PathContains $installedUserPath $stableJavaBin 'Regular install did not add current\bin to user PATH'
+            if (Test-Path -LiteralPath $stableJavaBin) {
+                throw 'Regular install unexpectedly required an existing current JDK'
             }
 
             # /S is intentionally the only argument: the installed copy must
@@ -132,6 +163,7 @@ try {
             }
             Assert-Equal $false (Test-Path -LiteralPath 'Registry::HKEY_CURRENT_USER\Software\jvman\Installer') 'Direct uninstaller left installer registry state'
             Assert-Equal $false (Test-Path -LiteralPath 'Registry::HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Uninstall\jvman') 'Direct uninstaller left Add/Remove Programs state'
+            Assert-Equal $beforePath ([Environment]::GetEnvironmentVariable('Path', 'User')) 'Direct uninstall did not restore user PATH'
         }
         finally {
             [Environment]::SetEnvironmentVariable('JVMAN_HOME', $beforeProcessJvmanHome, 'Process')
@@ -154,13 +186,19 @@ try {
     Write-Output 'Installer portable and integrity tests passed.'
 }
 finally {
-    # Remove only the uniquely named temporary tree created by this test.
-    if ($root -and (Test-Path -LiteralPath $root)) {
-        $tempRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())
-        $resolvedRoot = [IO.Path]::GetFullPath($root)
-        if ($resolvedRoot.StartsWith($tempRoot, [StringComparison]::OrdinalIgnoreCase) -and
-            [IO.Path]::GetFileName($resolvedRoot).StartsWith('jvman-installer-test-', [StringComparison]::Ordinal)) {
-            Remove-Item -LiteralPath $resolvedRoot -Recurse -Force -ErrorAction SilentlyContinue
+    try {
+        [Environment]::SetEnvironmentVariable('Path', $beforePath, 'User')
+        [Environment]::SetEnvironmentVariable('JAVA_HOME', $beforeJavaHome, 'User')
+    }
+    finally {
+        # Remove only the uniquely named temporary tree created by this test.
+        if ($root -and (Test-Path -LiteralPath $root)) {
+            $tempRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())
+            $resolvedRoot = [IO.Path]::GetFullPath($root)
+            if ($resolvedRoot.StartsWith($tempRoot, [StringComparison]::OrdinalIgnoreCase) -and
+                [IO.Path]::GetFileName($resolvedRoot).StartsWith('jvman-installer-test-', [StringComparison]::Ordinal)) {
+                Remove-Item -LiteralPath $resolvedRoot -Recurse -Force -ErrorAction SilentlyContinue
+            }
         }
     }
 }

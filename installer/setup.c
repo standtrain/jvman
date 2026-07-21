@@ -795,13 +795,19 @@ static JvmanEnvironmentStatus installer_apply_path_entry(
 static int installer_apply_environment(const InstallerOptions *options,
                                        const JvmanInstallPaths *paths,
                                        JvmanInstallerMetadata *metadata,
-                                       int *changed_out) {
+                                       int *changed_out,
+                                       int *java_home_changed_out) {
     wchar_t current[JVMAN_INSTALL_PATH_CHARS];
     int changed = 0;
     int step_changed = 0;
+    int manage_java_path;
     JvmanEnvironmentStatus status;
-    if (!options || !paths || !metadata || !changed_out) return -1;
+    if (!options || !paths || !metadata || !changed_out ||
+        !java_home_changed_out) return -1;
     *changed_out = 0;
+    *java_home_changed_out = 0;
+    manage_java_path = options->add_path &&
+                       options->path_scope == JVMAN_ENV_SCOPE_USER;
     if (options->add_path) {
         status = installer_apply_path_entry(
             paths->install_dir, options->path_scope, 1,
@@ -826,33 +832,35 @@ static int installer_apply_environment(const InstallerOptions *options,
             current, metadata, options->replace_java_home, &step_changed);
         if (status != JVMAN_ENV_OK) return (int)status;
         changed |= step_changed;
+        *java_home_changed_out |= step_changed;
+    } else if (options->configure_java == -1 && metadata->java_home_owned) {
+        status = jvman_environment_restore_java_home(metadata, &step_changed);
+        if (status != JVMAN_ENV_OK) return (int)status;
+        metadata->java_home_owned = 0;
+        changed |= step_changed;
+        *java_home_changed_out |= step_changed;
+    }
+
+    if (manage_java_path || metadata->java_path_owned) {
         if (installer_join(current, sizeof(current) / sizeof(*current),
-                           current, L"bin") != 0) return (int)JVMAN_ENV_TOO_LONG;
+                           paths->data_home, L"current\\bin") != 0) {
+            return (int)JVMAN_ENV_TOO_LONG;
+        }
+    }
+    if (manage_java_path) {
         status = installer_apply_path_entry(
             current, options->path_scope, 1,
             &metadata->java_path_owned, &metadata->java_path_scope,
             &step_changed);
         if (status != JVMAN_ENV_OK) return (int)status;
         changed |= step_changed;
-    } else {
-        if (metadata->java_home_owned) {
-            status = jvman_environment_restore_java_home(metadata, &step_changed);
-            if (status != JVMAN_ENV_OK) return (int)status;
-            metadata->java_home_owned = 0;
-            changed |= step_changed;
-        }
-        if (metadata->java_path_owned) {
-            if (installer_join(current, sizeof(current) / sizeof(*current),
-                               paths->data_home, L"current\\bin") != 0) {
-                return (int)JVMAN_ENV_TOO_LONG;
-            }
-            status = installer_apply_path_entry(
-                current, options->path_scope, 0,
-                &metadata->java_path_owned, &metadata->java_path_scope,
-                &step_changed);
-            if (status != JVMAN_ENV_OK) return (int)status;
-            changed |= step_changed;
-        }
+    } else if (metadata->java_path_owned) {
+        status = installer_apply_path_entry(
+            current, options->path_scope, 0,
+            &metadata->java_path_owned, &metadata->java_path_scope,
+            &step_changed);
+        if (status != JVMAN_ENV_OK) return (int)status;
+        changed |= step_changed;
     }
     *changed_out = changed;
     return 0;
@@ -865,7 +873,8 @@ static void installer_rollback_environment(const InstallerOptions *options,
                                            uint32_t old_app_scope,
                                            uint32_t old_java_scope,
                                            int old_java_home_owned,
-                                           const wchar_t *old_java_home_value) {
+                                           const wchar_t *old_java_home_value,
+                                           int java_home_changed) {
     int changed;
     if (!options || !paths || !metadata) return;
     if (metadata->app_path_owned &&
@@ -903,7 +912,7 @@ static void installer_rollback_environment(const InstallerOptions *options,
                 &changed);
         }
     }
-    if (old_java_home_owned) {
+    if (java_home_changed && old_java_home_owned) {
         /* Restore the exact value that was managed before the transaction.
          * The current metadata may already contain a newly configured value,
          * so checking only the ownership bit is insufficient. */
@@ -911,7 +920,7 @@ static void installer_rollback_environment(const InstallerOptions *options,
             (void)jvman_environment_configure_java_home(
                 old_java_home_value, metadata, 1, &changed);
         }
-    } else if (metadata->java_home_owned) {
+    } else if (java_home_changed && metadata->java_home_owned) {
         (void)jvman_environment_restore_java_home(metadata, &changed);
     }
 }
@@ -973,6 +982,7 @@ static int installer_install(const InstallerOptions *options) {
     wchar_t marker_id[JVMAN_INSTALL_MARKER_ID_CHARS];
     int found = 0;
     int changed = 0;
+    int java_home_changed = 0;
     int old_app_owned;
     int old_java_owned;
     uint32_t old_app_scope;
@@ -1106,13 +1116,14 @@ static int installer_install(const InstallerOptions *options) {
             }
         }
         env_status = (JvmanEnvironmentStatus)installer_apply_environment(
-            options, &paths, &metadata, &changed);
+            options, &paths, &metadata, &changed, &java_home_changed);
         if (env_status != JVMAN_ENV_OK) {
             installer_rollback_environment(options, &paths, &metadata,
                                            old_app_owned, old_java_owned,
                                            old_app_scope, old_java_scope,
                                            old_java_home_owned,
-                                           old_java_home_value);
+                                           old_java_home_value,
+                                           java_home_changed);
             goto environment_failure;
         }
         if (installer_set_field(&metadata.version, JVMAN_VERSION_W) != 0 ||
@@ -1122,7 +1133,8 @@ static int installer_install(const InstallerOptions *options) {
                                            old_app_owned, old_java_owned,
                                            old_app_scope, old_java_scope,
                                            old_java_home_owned,
-                                           old_java_home_value);
+                                           old_java_home_value,
+                                           java_home_changed);
             env_status = JVMAN_ENV_NO_MEMORY;
             free(old_java_home_value);
             old_java_home_value = NULL;
@@ -1134,7 +1146,8 @@ static int installer_install(const InstallerOptions *options) {
                                            old_app_owned, old_java_owned,
                                            old_app_scope, old_java_scope,
                                            old_java_home_owned,
-                                           old_java_home_value);
+                                           old_java_home_value,
+                                           java_home_changed);
             free(old_java_home_value);
             old_java_home_value = NULL;
             goto environment_failure;

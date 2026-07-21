@@ -375,10 +375,67 @@ try {
     $list = (Invoke-Jvman list) -join "`n"
     if ($list -notmatch 'a' -or $list -notmatch 'b') { throw 'list did not show both JDKs' }
 
-    Invoke-Jvman use a | Out-Null
+    $useOutput = (Invoke-Jvman use a) -join "`n"
+    if ($useOutput -notmatch 'jvman init') {
+        throw "use did not explain how to initialize the current shell:`n$useOutput"
+    }
     if ((Invoke-Jvman current) -ne 'a') { throw 'current did not return a' }
     if (-not (Test-Path -LiteralPath (Join-Path $stateRoot 'current\bin\java.exe'))) {
         throw 'current junction does not expose the selected JDK'
+    }
+    $cmdInitProbe = Join-Path $testRoot 'cmd-init-probe.cmd'
+    $oldCmdBinaryDir = [Environment]::GetEnvironmentVariable(
+        'JVMAN_TEST_BINARY_DIR', 'Process')
+    $oldCmdExpectedHome = [Environment]::GetEnvironmentVariable(
+        'JVMAN_TEST_EXPECTED_HOME', 'Process')
+    try {
+        $cmdExpectedHome = Join-Path ((Invoke-Jvman home).Trim()) 'current'
+        [Environment]::SetEnvironmentVariable(
+            'JVMAN_TEST_BINARY_DIR', (Split-Path -Parent $binaryPath), 'Process')
+        [Environment]::SetEnvironmentVariable(
+            'JVMAN_TEST_EXPECTED_HOME', $cmdExpectedHome, 'Process')
+        Set-Content -LiteralPath $cmdInitProbe -Encoding ASCII -Value @(
+            '@echo off',
+            'setlocal DisableDelayedExpansion',
+            'set "JAVA_HOME="',
+            'set "PATH=%JVMAN_TEST_BINARY_DIR%;%SystemRoot%\System32"',
+            'for /f "delims=" %%L in (''jvman.exe init cmd'') do @call %%L',
+            'if /i not "%JAVA_HOME%"=="%JVMAN_TEST_EXPECTED_HOME%" (',
+            '  echo CMD JAVA_HOME mismatch: actual="%JAVA_HOME%" expected="%JVMAN_TEST_EXPECTED_HOME%" 1>&2',
+            '  exit /b 61',
+            ')',
+            'for /f "tokens=1 delims=;" %%J in ("%PATH%") do (',
+            '  if /i not "%%~fJ"=="%JVMAN_TEST_EXPECTED_HOME%\bin" (',
+            '    echo CMD PATH mismatch: actual="%%~fJ" expected="%JVMAN_TEST_EXPECTED_HOME%\bin" 1>&2',
+            '    exit /b 62',
+            '  )',
+            '  if not exist "%%~fJ\java.exe" exit /b 63',
+            '  exit /b 0',
+            ')',
+            'exit /b 64'
+        )
+        & cmd.exe /d /c $cmdInitProbe
+        if ($LASTEXITCODE -ne 0) {
+            throw "the suggested CMD initialization command failed with exit code $LASTEXITCODE"
+        }
+    }
+    finally {
+        [Environment]::SetEnvironmentVariable(
+            'JVMAN_TEST_BINARY_DIR', $oldCmdBinaryDir, 'Process')
+        [Environment]::SetEnvironmentVariable(
+            'JVMAN_TEST_EXPECTED_HOME', $oldCmdExpectedHome, 'Process')
+        Remove-Item -LiteralPath $cmdInitProbe -Force -ErrorAction SilentlyContinue
+    }
+    $pathBeforeInitializedUse = $env:Path
+    try {
+        $env:Path = (Join-Path $stateRoot 'current\bin') + ';' + $env:Path
+        $initializedUseOutput = (Invoke-Jvman use a) -join "`n"
+        if ($initializedUseOutput -match 'jvman init') {
+            throw "use printed an initialization hint for an initialized shell:`n$initializedUseOutput"
+        }
+    }
+    finally {
+        $env:Path = $pathBeforeInitializedUse
     }
     $registeredA = (Invoke-Jvman which a).Trim()
     $childHome = (& $binaryPath exec a -- cmd.exe /d /c 'echo %JAVA_HOME%').Trim()

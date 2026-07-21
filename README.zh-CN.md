@@ -62,7 +62,7 @@ mingw32-make.exe
 默认选中“跟随系统”，并根据 Windows 界面语言决定实际界面；也可显式选择
 English 或简体中文。取消语言选择会直接退出安装程序。
 
-不带参数启动时，安装器会依次询问是否把程序目录加入 `PATH`、PATH 项写入“仅当前用户”还是“所有用户”、是否用有效的 `current` JDK 配置 `JAVA_HOME` 与 `current\bin`，以及是否在安装后执行 `jvman discover --register`。已有 `PATH` 项会保留，精确或规范化后的重复项不会再次加入；写入系统 `PATH` 需要以管理员身份运行安装器。
+不带参数启动时，安装器会依次询问是否启用 `PATH` 集成、PATH 项写入“仅当前用户”还是“所有用户”、是否用有效的 `current` JDK 配置 `JAVA_HOME`，以及是否在安装后执行 `jvman discover --register`。当前用户 PATH 集成会同时加入程序目录和稳定的 `<数据目录>\current\bin`；即使尚未选择 JDK，也会预先加入该稳定路径，后续 `jvman use` 只需重定向 `current`。系统 PATH 集成仅加入程序目录。已有 PATH 项会保留，精确或规范化后的重复项不会再次加入。
 
 常用命令行参数：
 
@@ -75,9 +75,19 @@ jvman-setup.exe /UNINSTALL [/S]
 jvman-setup.exe /HELP
 ```
 
-`/S`、`/SILENT` 和 `/QUIET` 表示静默安装。`/ADD_TO_PATH` 显式开启 `PATH` 更新。`/USER_PATH` 写入当前用户环境并且是默认值；`/SYSTEM_PATH`（也可用 `/MACHINE_PATH` 或 `/ALL_USERS_PATH`）写入系统环境，需要管理员权限。`/NO_PATH`（或 `/NO_ADD_TO_PATH`）关闭 PATH 更新；重复安装时还会删除此前由本安装器拥有的 PATH 项。`/CONFIGURE_JAVA` 只在确认后生效，并要求 `<数据目录>\current\bin\java.exe` 与 `javac.exe` 均存在；如果已有不同的 `JAVA_HOME`，没有 `/REPLACE_JAVA_HOME` 时会报告冲突并保持原值。`/DISCOVER` 只在安装完成后执行发现，不会自动选择当前 JDK。环境变量更新会广播给已运行的程序，但建议打开新终端后再使用新的 `PATH`。
+`/S`、`/SILENT` 和 `/QUIET` 表示静默安装。`/ADD_TO_PATH` 显式开启 `PATH` 集成。`/USER_PATH` 把程序目录和稳定的 `<数据目录>\current\bin` 写入当前用户环境，并且是默认值；`/SYSTEM_PATH`（也可用 `/MACHINE_PATH` 或 `/ALL_USERS_PATH`）只把程序目录写入系统环境，需要管理员权限，不会把用户可写的 JDK 目录加入系统 PATH。`/NO_PATH`（或 `/NO_ADD_TO_PATH`）关闭 PATH 更新；重复安装时还会删除此前由本安装器拥有的程序和 Java PATH 项。`/CONFIGURE_JAVA` 只配置当前用户 `JAVA_HOME`，并要求 `<数据目录>\current\bin\java.exe` 与 `javac.exe` 均存在；如果已有不同的 `JAVA_HOME`，没有 `/REPLACE_JAVA_HOME` 时会报告冲突并保持原值。`/DISCOVER` 只在安装完成后执行发现，不会自动选择当前 JDK。
 
-`/NO_CONFIGURE_JAVA` 会关闭 Java 环境配置；重复安装时，如果这些变量曾由本安装器管理，会恢复原先的 `JAVA_HOME`。
+`/NO_CONFIGURE_JAVA` 会关闭 `JAVA_HOME` 配置；重复安装时，如果该变量曾由本安装器管理，会恢复原先的值。它不会覆盖单独作出的 PATH 选择。
+
+安装前已经打开的终端会保留旧的进程环境。请重新打开终端，或在现有终端执行对应命令：
+
+```cmd
+for /f "delims=" %L in ('jvman init cmd') do @call %L
+```
+
+```powershell
+jvman init powershell | Invoke-Expression
+```
 
 无人值守部署时，请将需要的参数与 `/S` 组合使用；不带 `/S` 时会显示相同选项的图形确认对话框。
 

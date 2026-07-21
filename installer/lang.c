@@ -31,11 +31,13 @@ static const wchar_t *const lang_table[JVMAN_LANG_COUNT][JVMAN_STR_COUNT] = {
                                             L"System PATH can be selected later and requires administrator permission.",
         [JVMAN_STR_BROWSE_TITLE]         = L"Choose the jvman install directory",
         [JVMAN_STR_ADD_PATH_PROMPT]      = L"Add jvman to PATH?\n\n"
+                                            L"Current-user installs also add the stable current\\bin path.\n"
                                             L"Existing PATH entries are kept and duplicates are skipped.",
         [JVMAN_STR_PATH_SCOPE_PROMPT]    = L"Add PATH entries for all users?\n\n"
                                             L"Choose Yes for the system PATH. Choose No for only your user PATH.\n"
                                             L"System PATH requires running this installer as administrator.",
-        [JVMAN_STR_CONFIGURE_JAVA_PROMPT]= L"A valid jvman current JDK exists. Configure JAVA_HOME and current\\bin?\n\n"
+        [JVMAN_STR_CONFIGURE_JAVA_PROMPT]= L"A valid jvman current JDK exists. Configure JAVA_HOME?\n\n"
+                                            L"The stable current\\bin path follows the earlier PATH choice.\n"
                                             L"This may replace the current user JAVA_HOME value.",
         [JVMAN_STR_DISCOVER_PROMPT]      = L"Discover and register installed JDKs after installation?\n\n"
                                             L"JREs are never registered and the current version is not changed.",
@@ -76,12 +78,12 @@ static const wchar_t *const lang_table[JVMAN_LANG_COUNT][JVMAN_STR_COUNT] = {
                                               L"Options:\n"
                                               L"  /S, /SILENT, or /QUIET       silent install\n"
                                               L"  /DIR=<path>                  choose install directory\n"
-                                              L"  /ADD_TO_PATH                 add the program directory to PATH\n"
-                                              L"  /USER_PATH                   add PATH entries for current user\n"
+                                              L"  /ADD_TO_PATH                 enable PATH integration\n"
+                                              L"  /USER_PATH                   add program and current\\bin paths for current user\n"
                                               L"  /SYSTEM_PATH                 add PATH entries for all users\n"
                                               L"  /NO_PATH                     do not modify PATH\n"
-                                              L"  /CONFIGURE_JAVA              configure JAVA_HOME/current\n"
-                                              L"  /NO_CONFIGURE_JAVA           leave Java environment unchanged\n"
+                                              L"  /CONFIGURE_JAVA              configure current-user JAVA_HOME\n"
+                                              L"  /NO_CONFIGURE_JAVA           restore installer-managed JAVA_HOME\n"
                                               L"  /REPLACE_JAVA_HOME          allow replacing user JAVA_HOME\n"
                                               L"  /DISCOVER                    register discovered JDKs after install\n"
                                               L"  /PORTABLE /DIR=<path>        extract only jvman.exe\n"
@@ -102,11 +104,13 @@ static const wchar_t *const lang_table[JVMAN_LANG_COUNT][JVMAN_STR_COUNT] = {
                                             L"稍后可选择系统 PATH，需要管理员权限。",
         [JVMAN_STR_BROWSE_TITLE]         = L"选择 jvman 安装目录",
         [JVMAN_STR_ADD_PATH_PROMPT]      = L"将 jvman 添加到 PATH？\n\n"
+                                            L"当前用户安装还会添加稳定的 current\\bin 路径。\n"
                                             L"已有的 PATH 条目将被保留，重复项会自动跳过。",
         [JVMAN_STR_PATH_SCOPE_PROMPT]    = L"为所有用户添加 PATH 条目？\n\n"
                                             L"选择“是”将写入系统 PATH，选择“否”仅写入当前用户 PATH。\n"
                                             L"系统 PATH 需要以管理员身份运行此安装程序。",
-        [JVMAN_STR_CONFIGURE_JAVA_PROMPT]= L"检测到有效的 jvman current JDK。是否配置 JAVA_HOME 和 current\\bin？\n\n"
+        [JVMAN_STR_CONFIGURE_JAVA_PROMPT]= L"检测到有效的 jvman current JDK。是否配置 JAVA_HOME？\n\n"
+                                            L"稳定的 current\\bin 路径由前面的 PATH 选择管理。\n"
                                             L"这可能会替换当前用户的 JAVA_HOME 值。",
         [JVMAN_STR_DISCOVER_PROMPT]      = L"安装完成后是否自动发现并注册已安装的 JDK？\n\n"
                                             L"JRE 不会被注册，当前使用的版本不会被更改。",
@@ -147,12 +151,12 @@ static const wchar_t *const lang_table[JVMAN_LANG_COUNT][JVMAN_STR_COUNT] = {
                                               L"选项：\n"
                                               L"  /S、/SILENT 或 /QUIET        静默安装\n"
                                               L"  /DIR=<路径>                  选择安装目录\n"
-                                              L"  /ADD_TO_PATH                 将程序目录添加到 PATH\n"
-                                              L"  /USER_PATH                   为当前用户添加 PATH 条目\n"
+                                              L"  /ADD_TO_PATH                 启用 PATH 集成\n"
+                                              L"  /USER_PATH                   为当前用户添加程序和 current\\bin 路径\n"
                                               L"  /SYSTEM_PATH                 为所有用户添加 PATH 条目\n"
                                               L"  /NO_PATH                     不修改 PATH\n"
-                                              L"  /CONFIGURE_JAVA              配置 JAVA_HOME/current\n"
-                                              L"  /NO_CONFIGURE_JAVA           不修改 Java 环境\n"
+                                              L"  /CONFIGURE_JAVA              配置当前用户 JAVA_HOME\n"
+                                              L"  /NO_CONFIGURE_JAVA           恢复安装器管理的 JAVA_HOME\n"
                                               L"  /REPLACE_JAVA_HOME           允许替换用户 JAVA_HOME\n"
                                               L"  /DISCOVER                    安装后注册发现的 JDK\n"
                                               L"  /PORTABLE /DIR=<路径>        仅解压 jvman.exe\n"

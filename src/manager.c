@@ -229,6 +229,33 @@ static int switch_to_registration(const JvmanContext *context,
     return 0;
 }
 
+static int shell_resolves_selected_java(const JvmanContext *context) {
+    char expected[JVMAN_PATH_MAX];
+    char expected_canonical[JVMAN_PATH_MAX];
+    char actual[JVMAN_PATH_MAX];
+    if (!context ||
+        jvman_path_join3(expected, sizeof(expected), context->current_link,
+                         "bin", JVMAN_JAVA_EXE) != 0 ||
+        platform_absolute_path(expected, expected_canonical,
+                               sizeof(expected_canonical)) != 0 ||
+        platform_find_executable(JVMAN_JAVA_EXE, actual, sizeof(actual)) != 0) {
+        return 0;
+    }
+    return jvman_path_equal(expected_canonical, actual);
+}
+
+static void print_shell_initialization_hint(const JvmanContext *context) {
+    if (shell_resolves_selected_java(context)) return;
+#if defined(_WIN32)
+    printf("The selected Java is not active in this shell yet. Initialize it with one of:\n");
+    printf("  CMD: for /f \"delims=\" %%L in ('jvman init cmd') do @call %%L\n");
+    printf("  PowerShell: jvman init powershell | Invoke-Expression\n");
+#else
+    printf("The selected Java is not active in this shell yet. Initialize it with:\n");
+    printf("  sh: eval \"$(jvman init sh)\"\n");
+#endif
+}
+
 static int command_use(const JvmanContext *context, const char *name) {
     JvmanRegistration registration;
     PlatformLock lock;
@@ -253,6 +280,7 @@ done:
     platform_lock_release(&lock);
     if (result == 0) {
         printf("Now using %s (%s)\n", registration.name, registration.home);
+        print_shell_initialization_hint(context);
     }
     return result;
 }
@@ -775,7 +803,7 @@ static int command_init(const JvmanContext *context, const char *shell) {
     }
     if (strcmp(shell, "cmd") == 0) {
         printf("set \"JAVA_HOME=%s\"\n", context->current_link);
-        puts("if defined PATH (set \"PATH=%JAVA_HOME%\\bin;%PATH%\") else set \"PATH=%JAVA_HOME%\\bin\"");
+        puts("set \"PATH=%JAVA_HOME%\\bin;%PATH%\"");
         return 0;
     }
     if (strcmp(shell, "sh") == 0 || strcmp(shell, "bash") == 0 ||
