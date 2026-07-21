@@ -39,6 +39,7 @@
 # 系统文件
 .DS_Store
 Thumbs.db
+/NUL
 
 # 依赖与构建缓存
 node_modules/
