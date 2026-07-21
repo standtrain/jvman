@@ -17,6 +17,10 @@
 *.res
 *.tmp
 
+# Codex 卸载工具残留
+.codex-*
+.build-tmp/
+
 # 敏感配置（严禁提交）
 .env
 .env.*

@@ -19,6 +19,8 @@ typedef int (*PlatformPathVisitor)(const char *path, const char *vendor_hint,
 
 const char *platform_last_error(void);
 void platform_clear_error(void);
+/* 在进程启动期关闭当前目录参与可执行文件搜索，防御 PATH 注入。 */
+void platform_init_secure_search_path(void);
 int platform_default_root(char *out, size_t out_size);
 int platform_absolute_path(const char *path, char *out, size_t out_size);
 int platform_mkdirs(const char *path);

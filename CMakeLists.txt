@@ -180,7 +180,7 @@ if(BUILD_TESTING)
     )
     target_include_directories(test_update_helper PRIVATE src)
     if(MSVC)
-        target_compile_options(test_update_helper PRIVATE /W4)
+        target_compile_options(test_update_helper PRIVATE /W4 /utf-8)
     else()
         target_compile_options(test_update_helper PRIVATE
             -Wall -Wextra -Wpedantic)

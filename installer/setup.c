@@ -3010,6 +3010,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous,
     (void)previous;
     (void)command_line;
     (void)show_command;
+    /* 关闭当前目录参与可执行文件搜索，防御 CreateProcess(NULL, command, ...) 时的 PATH 注入。 */
+    (void)SetSearchPathMode(
+        BASE_SEARCH_PATH_ENABLE_SAFE_SEARCHMODE | BASE_SEARCH_PATH_PERMANENT);
     jvman_lang_use_system_default();
     installer_source_lock_init(&source_lock);
     com_status = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);

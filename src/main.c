@@ -9,6 +9,7 @@
 int main(int argc, char **argv) {
     JvmanContext context;
     int update_helper_handled = 0;
+    platform_init_secure_search_path();
     jvman_i18n_init();
     int update_helper_result = platform_handle_update_helper(
         argc, argv, &update_helper_handled);

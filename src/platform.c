@@ -121,6 +121,16 @@ void platform_clear_error(void) {
     platform_error_buffer[0] = '\0';
 }
 
+void platform_init_secure_search_path(void) {
+#if defined(_WIN32)
+    /* BASE_SEARCH_PATH_ENABLE_SAFE_SEARCHMODE 会从默认搜索顺序中移除当前工作目录，
+     * BASE_SEARCH_PATH_PERMANENT 让设置对本进程后续所有 SearchPath 调用永久生效，
+     * 防御 jvman exec / extractor 等场景下的当前目录 PATH 注入。 */
+    (void)SetSearchPathMode(
+        BASE_SEARCH_PATH_ENABLE_SAFE_SEARCHMODE | BASE_SEARCH_PATH_PERMANENT);
+#endif
+}
+
 #if defined(_WIN32)
 static int platform_wide_to_utf8(const WCHAR *wide, char **utf8_out) {
     int required;
@@ -1102,41 +1112,33 @@ static int windows_try_pathext_candidate(const char *base, char *out, size_t out
 }
 
 static int windows_resolve_command(const char *name, char *out, size_t out_size) {
-    char found[JVMAN_PATH_MAX];
-    DWORD length;
-    const char *extensions;
+    /* 手动遍历 PATH 环境变量，跳过空项（即当前目录），避免 SearchPathA 默认搜索当前
+     * 目录带来的 PATH 注入风险。带路径分隔符的 name 直接按字面解析。 */
+    const char *path;
     const char *cursor;
     if (!name || !*name) return -1;
     if (windows_has_path_component(name)) {
         return windows_try_pathext_candidate(name, out, out_size);
     }
-    if (windows_has_extension(name)) {
-        length = SearchPathA(NULL, name, NULL, (DWORD)sizeof(found), found, NULL);
-        if (length > 0 && length < sizeof(found)) {
-            return platform_absolute_path(found, out, out_size);
-        }
-        return -1;
-    }
-    extensions = getenv("PATHEXT");
-    if (!extensions || !*extensions) extensions = ".COM;.EXE;.BAT;.CMD";
-    cursor = extensions;
-    while (*cursor) {
+    path = getenv("PATH");
+    cursor = path;
+    while (cursor && *cursor) {
         const char *end = strchr(cursor, ';');
-        size_t extension_length = end ? (size_t)(end - cursor) : strlen(cursor);
-        char extension[32];
-        if (extension_length > 1 && extension_length < sizeof(extension)) {
-            memcpy(extension, cursor, extension_length);
-            extension[extension_length] = '\0';
-            length = SearchPathA(NULL, name, extension, (DWORD)sizeof(found), found, NULL);
-            if (length > 0 && length < sizeof(found) &&
-                platform_absolute_path(found, out, out_size) == 0) return 0;
+        size_t directory_length = end ? (size_t)(end - cursor) : strlen(cursor);
+        char directory[JVMAN_PATH_MAX];
+        char base[JVMAN_PATH_MAX];
+        if (directory_length == 0) {
+            /* 空项表示当前目录，跳过。 */
+        } else if (directory_length < sizeof(directory)) {
+            memcpy(directory, cursor, directory_length);
+            directory[directory_length] = '\0';
+            if (jvman_path_join(base, sizeof(base), directory, name) == 0 &&
+                windows_try_pathext_candidate(base, out, out_size) == 0) {
+                return 0;
+            }
         }
         if (!end) break;
         cursor = end + 1;
-    }
-    length = SearchPathA(NULL, name, NULL, (DWORD)sizeof(found), found, NULL);
-    if (length > 0 && length < sizeof(found)) {
-        return platform_absolute_path(found, out, out_size);
     }
     return -1;
 }
