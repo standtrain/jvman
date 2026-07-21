@@ -54,6 +54,28 @@ function Assert-PathContains(
     throw "$Message (missing '$Expected')"
 }
 
+function Assert-UserUninstallCompleted([string]$InstallDir) {
+    $uninstaller = Join-Path $InstallDir 'uninstall.exe'
+    $executable = Join-Path $InstallDir 'jvman.exe'
+    $marker = Join-Path $InstallDir 'install.marker'
+    $deadline = [DateTime]::UtcNow.AddSeconds(10)
+    while (((Test-Path -LiteralPath $uninstaller) -or
+            (Test-Path -LiteralPath $executable) -or
+            (Test-Path -LiteralPath $marker) -or
+            (Test-Path -LiteralPath 'Registry::HKEY_CURRENT_USER\Software\jvman\Installer')) -and
+           [DateTime]::UtcNow -lt $deadline) {
+        Start-Sleep -Milliseconds 100
+    }
+    $uninstallerRemaining = Test-Path -LiteralPath $uninstaller
+    $executableRemaining = Test-Path -LiteralPath $executable
+    $markerRemaining = Test-Path -LiteralPath $marker
+    $metadataRemaining = Test-Path -LiteralPath 'Registry::HKEY_CURRENT_USER\Software\jvman\Installer'
+    if ($uninstallerRemaining -or $executableRemaining -or
+        $markerRemaining -or $metadataRemaining) {
+        throw "Uninstall cleanup incomplete (uninstaller=$uninstallerRemaining, executable=$executableRemaining, marker=$markerRemaining, metadata=$metadataRemaining)"
+    }
+}
+
 $setupPath = Resolve-ExistingFile $Setup 'Setup'
 $binaryPath = Resolve-ExistingFile $Binary 'Payload binary'
 $root = Join-Path ([IO.Path]::GetTempPath()) ("jvman-installer-test-" + [guid]::NewGuid().ToString('N'))
@@ -125,8 +147,18 @@ try {
         throw 'Corrupted setup published a payload'
     }
 
+    Assert-Equal 2 (Invoke-GuiProcess $setupPath @('/S', '/REMOVE_DATA')) 'Data removal was accepted without uninstall mode'
+    Assert-Equal 2 (Invoke-GuiProcess $setupPath @('/S', '/UNINSTALL', '/REMOVE_JDKS')) 'Managed JDK removal was accepted without data removal'
+
     if (-not $beforeInstallerState -and -not $beforeArpState) {
         $regularUninstaller = Join-Path $regularInstallDir 'uninstall.exe'
+        $managedJdkDir = Join-Path $regularDataDir 'jdks\managed-test'
+        $managedSentinel = Join-Path $managedJdkDir 'managed.marker'
+        $cacheSentinel = Join-Path $regularDataDir 'cache\download.tmp'
+        $versionsSentinel = Join-Path $regularDataDir 'versions\managed-test.conf'
+        $externalJdkDir = Join-Path $root 'external-jdk'
+        $externalSentinel = Join-Path $externalJdkDir 'external.marker'
+        $currentLink = Join-Path $regularDataDir 'current'
         [Environment]::SetEnvironmentVariable('JVMAN_HOME', $regularDataDir, 'Process')
         try {
             $regularArguments = @('/S', '/ADD_TO_PATH', '/USER_PATH', "/DIR=`"$regularInstallDir`"")
@@ -142,28 +174,61 @@ try {
                 throw 'Regular install unexpectedly required an existing current JDK'
             }
 
+            New-Item -ItemType Directory -Path $managedJdkDir -Force | Out-Null
+            New-Item -ItemType Directory -Path (Split-Path -Parent $cacheSentinel) -Force | Out-Null
+            New-Item -ItemType Directory -Path (Split-Path -Parent $versionsSentinel) -Force | Out-Null
+            New-Item -ItemType Directory -Path $externalJdkDir -Force | Out-Null
+            Set-Content -LiteralPath $managedSentinel -Value 'managed' -Encoding ASCII
+            Set-Content -LiteralPath $cacheSentinel -Value 'cache' -Encoding ASCII
+            Set-Content -LiteralPath $versionsSentinel -Value 'managed=1' -Encoding ASCII
+            Set-Content -LiteralPath $externalSentinel -Value 'external' -Encoding ASCII
+            New-Item -ItemType Junction -Path $currentLink -Target $externalJdkDir | Out-Null
+
             # /S is intentionally the only argument: the installed copy must
-            # infer uninstall mode from authenticated installation state.
+            # infer uninstall mode and preserve data by default.
             Assert-Equal 0 (Invoke-GuiProcess $regularUninstaller @('/S')) 'Installed uninstaller did not infer uninstall mode'
-            $cleanupDeadline = [DateTime]::UtcNow.AddSeconds(10)
-            while (((Test-Path -LiteralPath $regularUninstaller) -or
-                    (Test-Path -LiteralPath (Join-Path $regularInstallDir 'jvman.exe')) -or
-                    (Test-Path -LiteralPath (Join-Path $regularInstallDir 'install.marker')) -or
-                    (Test-Path -LiteralPath 'Registry::HKEY_CURRENT_USER\Software\jvman\Installer')) -and
-                   [DateTime]::UtcNow -lt $cleanupDeadline) {
-                Start-Sleep -Milliseconds 100
+            Assert-UserUninstallCompleted $regularInstallDir
+            Assert-Equal $beforePath ([Environment]::GetEnvironmentVariable('Path', 'User')) 'Program-only uninstall did not restore user PATH'
+            if (-not (Test-Path -LiteralPath $managedSentinel -PathType Leaf) -or
+                -not (Test-Path -LiteralPath $cacheSentinel -PathType Leaf) -or
+                -not (Test-Path -LiteralPath $currentLink)) {
+                throw 'Program-only uninstall removed jvman data'
             }
-            $uninstallerRemaining = Test-Path -LiteralPath $regularUninstaller
-            $executableRemaining = Test-Path -LiteralPath (Join-Path $regularInstallDir 'jvman.exe')
-            $markerRemaining = Test-Path -LiteralPath (Join-Path $regularInstallDir 'install.marker')
-            $metadataRemaining = Test-Path -LiteralPath 'Registry::HKEY_CURRENT_USER\Software\jvman\Installer'
-            if ($uninstallerRemaining -or $executableRemaining -or
-                $markerRemaining -or $metadataRemaining) {
-                throw "Direct uninstall cleanup incomplete (uninstaller=$uninstallerRemaining, executable=$executableRemaining, marker=$markerRemaining, metadata=$metadataRemaining)"
+
+            Assert-Equal 0 (Invoke-GuiProcess $setupPath $regularArguments) 'Reinstall before data removal failed'
+            Assert-Equal 0 (
+                Invoke-GuiProcess $regularUninstaller @('/S', '/UNINSTALL', '/REMOVE_DATA')
+            ) 'Data-preserving-JDK uninstall failed'
+            Assert-UserUninstallCompleted $regularInstallDir
+            Assert-Equal $beforePath ([Environment]::GetEnvironmentVariable('Path', 'User')) 'Data removal did not restore user PATH'
+            if (-not (Test-Path -LiteralPath $managedSentinel -PathType Leaf)) {
+                throw 'Data removal deleted a managed JDK without /REMOVE_JDKS'
             }
-            Assert-Equal $false (Test-Path -LiteralPath 'Registry::HKEY_CURRENT_USER\Software\jvman\Installer') 'Direct uninstaller left installer registry state'
-            Assert-Equal $false (Test-Path -LiteralPath 'Registry::HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Uninstall\jvman') 'Direct uninstaller left Add/Remove Programs state'
-            Assert-Equal $beforePath ([Environment]::GetEnvironmentVariable('Path', 'User')) 'Direct uninstall did not restore user PATH'
+            $unexpectedData = @(
+                Get-ChildItem -LiteralPath $regularDataDir -Force |
+                    Where-Object { $_.Name -ine 'jdks' }
+            )
+            if ($unexpectedData.Count -ne 0) {
+                throw "Data removal left non-JDK entries: $($unexpectedData.Name -join ', ')"
+            }
+            if (-not (Test-Path -LiteralPath $externalSentinel -PathType Leaf)) {
+                throw 'Data removal followed the current junction into an external JDK'
+            }
+
+            Assert-Equal 0 (Invoke-GuiProcess $setupPath $regularArguments) 'Reinstall before full removal failed'
+            Set-Content -LiteralPath (Join-Path $managedJdkDir 'second.marker') -Value 'managed' -Encoding ASCII
+            Assert-Equal 0 (
+                Invoke-GuiProcess $regularUninstaller @('/S', '/UNINSTALL', '/REMOVE_DATA', '/REMOVE_JDKS')
+            ) 'Full data and managed JDK uninstall failed'
+            Assert-UserUninstallCompleted $regularInstallDir
+            Assert-Equal $beforePath ([Environment]::GetEnvironmentVariable('Path', 'User')) 'Full uninstall did not restore user PATH'
+            if (Test-Path -LiteralPath $regularDataDir) {
+                throw 'Full uninstall left the jvman data directory'
+            }
+            if (-not (Test-Path -LiteralPath $externalSentinel -PathType Leaf)) {
+                throw 'Full uninstall deleted an external registered JDK'
+            }
+            Assert-Equal $false (Test-Path -LiteralPath 'Registry::HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Uninstall\jvman') 'Uninstaller left Add/Remove Programs state'
         }
         finally {
             [Environment]::SetEnvironmentVariable('JVMAN_HOME', $beforeProcessJvmanHome, 'Process')

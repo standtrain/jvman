@@ -245,6 +245,26 @@ if(BUILD_TESTING)
         target_link_libraries(test_installer_lang PRIVATE user32)
         add_test(NAME installer_lang COMMAND test_installer_lang)
 
+        add_executable(test_installer_data_cleanup
+            tests/test_installer_data_cleanup.c
+            installer/files.c
+            installer/package.c
+            src/platform.c
+            src/util.c
+            src/sha256.c
+        )
+        target_include_directories(test_installer_data_cleanup PRIVATE src installer)
+        target_compile_definitions(test_installer_data_cleanup PRIVATE _WIN32_WINNT=0x0601)
+        if(MSVC)
+            target_compile_options(test_installer_data_cleanup PRIVATE /W4 /utf-8)
+        else()
+            target_compile_options(test_installer_data_cleanup PRIVATE -Wall -Wextra -Wpedantic)
+        endif()
+        target_link_libraries(test_installer_data_cleanup PRIVATE
+            advapi32 winhttp shell32 ole32
+        )
+        add_test(NAME installer_data_cleanup COMMAND test_installer_data_cleanup)
+
         if(NOT CMAKE_CROSSCOMPILING)
             add_test(NAME installer
                 COMMAND powershell.exe -NoProfile -ExecutionPolicy Bypass

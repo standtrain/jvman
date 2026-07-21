@@ -49,8 +49,9 @@ INSTALLER_FILES := $(SETUP_STUB) $(PACK_SETUP) $(SETUP_TARGET) $(SETUP_RESOURCE_
 TEST_INSTALLER_PACKAGE := test_installer_package$(EXEEXT)
 TEST_INSTALLER_PATHLIST := test_installer_pathlist$(EXEEXT)
 TEST_INSTALLER_LANG := test_installer_lang$(EXEEXT)
+TEST_INSTALLER_DATA_CLEANUP := test_installer_data_cleanup$(EXEEXT)
 INSTALLER_TEST_TARGETS := $(TEST_INSTALLER_PACKAGE) $(TEST_INSTALLER_PATHLIST) \
-                          $(TEST_INSTALLER_LANG)
+                          $(TEST_INSTALLER_LANG) $(TEST_INSTALLER_DATA_CLEANUP)
 endif
 
 .PHONY: all clean test integration-test installer-test
@@ -117,6 +118,15 @@ $(TEST_INSTALLER_LANG): tests/test_lang.c installer/lang.c installer/lang.h \
 		installer/package.h
 	$(CC) -Iinstaller $(CPPFLAGS) $(CFLAGS) tests/test_lang.c installer/lang.c \
 		$(LDFLAGS) $(LDLIBS) -luser32 -o $@
+
+$(TEST_INSTALLER_DATA_CLEANUP): tests/test_installer_data_cleanup.c \
+		installer/files.c installer/files.h installer/package.c \
+		installer/package.h src/platform.c src/platform.h src/util.c src/util.h \
+		src/sha256.c src/sha256.h src/common.h
+	$(CC) -Iinstaller $(CPPFLAGS) $(CFLAGS) \
+		tests/test_installer_data_cleanup.c installer/files.c \
+		installer/package.c src/platform.c src/util.c src/sha256.c \
+		$(LDFLAGS) $(LDLIBS) -lole32 -o $@
 endif
 
 test: $(TEST_TARGET) $(UPDATE_TEST_TARGET) $(UPDATE_FLOW_TEST_TARGET) \
@@ -131,6 +141,7 @@ ifeq ($(OS),Windows_NT)
 	./$(TEST_INSTALLER_PACKAGE)
 	./$(TEST_INSTALLER_PATHLIST)
 	./$(TEST_INSTALLER_LANG)
+	./$(TEST_INSTALLER_DATA_CLEANUP)
 else
 	sh tests/test_update_helper.sh ./$(UPDATE_HELPER_TEST_TARGET)
 endif
@@ -157,7 +168,7 @@ ifeq ($(OS),Windows_NT)
 		$(UPDATE_FLOW_TEST_TARGET) $(UPDATE_HELPER_TEST_TARGET) \
 		$(RESOURCE_OBJ) $(INSTALLER_FILES) \
 		$(TEST_INSTALLER_PACKAGE) $(TEST_INSTALLER_PATHLIST) \
-		$(TEST_INSTALLER_LANG) 2>NUL
+		$(TEST_INSTALLER_LANG) $(TEST_INSTALLER_DATA_CLEANUP) 2>NUL
 else
 	rm -f $(TARGET) $(TEST_TARGET) $(UPDATE_TEST_TARGET) \
 		$(UPDATE_FLOW_TEST_TARGET) $(UPDATE_HELPER_TEST_TARGET)

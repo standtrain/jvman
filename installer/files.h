@@ -107,6 +107,14 @@ JvmanInstallStatus jvman_install_marker_read(
     wchar_t *installation_id,
     size_t installation_id_capacity);
 
+/* Delete the authenticated data tree without following reparse points.
+ * When remove_managed_jdks is zero, the exact top-level jdks directory is
+ * preserved and every other data entry is removed. External registered JDK
+ * paths are never traversed or deleted. */
+JvmanInstallStatus jvman_install_remove_data(
+    const JvmanInstallPaths *paths,
+    int remove_managed_jdks);
+
 /* Remove only the install whitelist.  No recursive deletion is performed.
  * SELF_CLEANUP_REQUIRED means the running module is paths->uninstall_path;
  * jvman.exe is already removed, while the marker and uninstaller are kept for

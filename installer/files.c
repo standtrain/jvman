@@ -26,6 +26,9 @@
 #define JVMAN_PE_MAX_SECTIONS 96u
 #define JVMAN_PE_MAX_OPTIONAL_HEADER 4096u
 #define JVMAN_TEMP_ATTEMPTS 128u
+#define JVMAN_DATA_DELETE_BUFFER_SIZE (64u * 1024u)
+#define JVMAN_DATA_DELETE_DEPTH_LIMIT 128u
+#define JVMAN_DATA_DELETE_ENTRY_LIMIT 1000000u
 
 static size_t bounded_wcslen(const wchar_t *value, size_t limit) {
     size_t length = 0;
@@ -1021,6 +1024,265 @@ static JvmanInstallStatus remove_whitelisted_file(const wchar_t *path) {
         return status_from_error(error);
     }
     return JVMAN_INSTALL_OK;
+}
+
+static int data_entry_name_equal(const wchar_t *name, size_t length,
+                                 const wchar_t *expected) {
+    size_t expected_length;
+    if (!name || !expected) return 0;
+    expected_length = wcslen(expected);
+    return length == expected_length &&
+           _wcsnicmp(name, expected, length) == 0;
+}
+
+static int data_entry_name_valid(const wchar_t *name, size_t length) {
+    size_t index;
+    if (!name || length == 0 || length >= JVMAN_INSTALL_PATH_CHARS) return 0;
+    for (index = 0; index < length; ++index) {
+        wchar_t value = name[index];
+        if (value == L'\0' || value == L'\\' || value == L'/' ||
+            value == L':') {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static JvmanInstallStatus data_next_child(
+    HANDLE directory, const wchar_t *skip_name,
+    wchar_t child_name[], size_t child_capacity, int *found_out) {
+    unsigned char buffer[JVMAN_DATA_DELETE_BUFFER_SIZE];
+    FILE_INFO_BY_HANDLE_CLASS info_class = FileIdBothDirectoryRestartInfo;
+    if (directory == NULL || directory == INVALID_HANDLE_VALUE ||
+        !child_name || child_capacity == 0 || !found_out) {
+        return JVMAN_INSTALL_INVALID_ARGUMENT;
+    }
+    *found_out = 0;
+    child_name[0] = L'\0';
+    for (;;) {
+        size_t offset = 0;
+        if (!GetFileInformationByHandleEx(
+                directory, info_class, buffer, (DWORD)sizeof(buffer))) {
+            DWORD error = GetLastError();
+            if (error == ERROR_NO_MORE_FILES || error == ERROR_FILE_NOT_FOUND) {
+                return JVMAN_INSTALL_OK;
+            }
+            return status_from_error(error);
+        }
+        info_class = FileIdBothDirectoryInfo;
+        for (;;) {
+            FILE_ID_BOTH_DIR_INFO *entry;
+            size_t fixed_size = offsetof(FILE_ID_BOTH_DIR_INFO, FileName);
+            size_t remaining;
+            size_t name_length;
+            if (offset > sizeof(buffer) ||
+                sizeof(buffer) - offset < fixed_size) {
+                return JVMAN_INSTALL_FORMAT_ERROR;
+            }
+            remaining = sizeof(buffer) - offset;
+            entry = (FILE_ID_BOTH_DIR_INFO *)(void *)(buffer + offset);
+            if ((entry->FileNameLength % sizeof(wchar_t)) != 0 ||
+                entry->FileNameLength > remaining - fixed_size) {
+                return JVMAN_INSTALL_FORMAT_ERROR;
+            }
+            name_length = entry->FileNameLength / sizeof(wchar_t);
+            if (!data_entry_name_valid(entry->FileName, name_length)) {
+                return JVMAN_INSTALL_INVALID_PATH;
+            }
+            if (!data_entry_name_equal(entry->FileName, name_length, L".") &&
+                !data_entry_name_equal(entry->FileName, name_length, L"..") &&
+                (!skip_name ||
+                 !data_entry_name_equal(entry->FileName, name_length,
+                                        skip_name))) {
+                if (name_length >= child_capacity) {
+                    return JVMAN_INSTALL_PATH_TOO_LONG;
+                }
+                memcpy(child_name, entry->FileName,
+                       name_length * sizeof(*child_name));
+                child_name[name_length] = L'\0';
+                *found_out = 1;
+                return JVMAN_INSTALL_OK;
+            }
+            if (entry->NextEntryOffset == 0) break;
+            if (entry->NextEntryOffset < fixed_size ||
+                entry->NextEntryOffset > remaining) {
+                return JVMAN_INSTALL_FORMAT_ERROR;
+            }
+            offset += entry->NextEntryOffset;
+        }
+    }
+}
+
+static JvmanInstallStatus data_handle_final_path(
+    HANDLE handle, wchar_t path[], size_t path_capacity) {
+    DWORD length;
+    if (handle == NULL || handle == INVALID_HANDLE_VALUE || !path ||
+        path_capacity == 0 || path_capacity > UINT32_MAX) {
+        return JVMAN_INSTALL_INVALID_ARGUMENT;
+    }
+    length = GetFinalPathNameByHandleW(
+        handle, path, (DWORD)path_capacity,
+        FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+    if (length == 0) return status_from_error(GetLastError());
+    if (length >= path_capacity) return JVMAN_INSTALL_PATH_TOO_LONG;
+    return JVMAN_INSTALL_OK;
+}
+
+static JvmanInstallStatus data_mark_handle_for_deletion(
+    HANDLE handle, DWORD attributes) {
+    FILE_DISPOSITION_INFO disposition;
+    DWORD error;
+    if (handle == NULL || handle == INVALID_HANDLE_VALUE) {
+        return JVMAN_INSTALL_INVALID_ARGUMENT;
+    }
+    disposition.DeleteFile = TRUE;
+    if (SetFileInformationByHandle(
+            handle, FileDispositionInfo, &disposition,
+            (DWORD)sizeof(disposition))) {
+        return JVMAN_INSTALL_OK;
+    }
+    error = GetLastError();
+    if ((attributes & FILE_ATTRIBUTE_READONLY) != 0) {
+        FILE_BASIC_INFO basic;
+        if (GetFileInformationByHandleEx(
+                handle, FileBasicInfo, &basic, (DWORD)sizeof(basic))) {
+            basic.FileAttributes &= ~FILE_ATTRIBUTE_READONLY;
+            if (basic.FileAttributes == 0) {
+                basic.FileAttributes = FILE_ATTRIBUTE_NORMAL;
+            }
+            if (SetFileInformationByHandle(
+                    handle, FileBasicInfo, &basic, (DWORD)sizeof(basic)) &&
+                SetFileInformationByHandle(
+                    handle, FileDispositionInfo, &disposition,
+                    (DWORD)sizeof(disposition))) {
+                return JVMAN_INSTALL_OK;
+            }
+            error = GetLastError();
+        }
+    }
+    return status_from_error(error);
+}
+
+static JvmanInstallStatus data_open_handle(
+    const wchar_t *path, HANDLE *handle_out, DWORD *attributes_out) {
+    HANDLE handle;
+    BY_HANDLE_FILE_INFORMATION information;
+    if (!path || !handle_out || !attributes_out) {
+        return JVMAN_INSTALL_INVALID_ARGUMENT;
+    }
+    *handle_out = INVALID_HANDLE_VALUE;
+    *attributes_out = 0;
+    handle = CreateFileW(
+        path, DELETE | FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES |
+                  FILE_WRITE_ATTRIBUTES | SYNCHRONIZE,
+        FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING,
+        FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+    if (handle == INVALID_HANDLE_VALUE) {
+        DWORD error = GetLastError();
+        if (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND) {
+            return JVMAN_INSTALL_NOT_FOUND;
+        }
+        return status_from_error(error);
+    }
+    if (!GetFileInformationByHandle(handle, &information)) {
+        JvmanInstallStatus status = status_from_error(GetLastError());
+        CloseHandle(handle);
+        return status;
+    }
+    *handle_out = handle;
+    *attributes_out = information.dwFileAttributes;
+    return JVMAN_INSTALL_OK;
+}
+
+static JvmanInstallStatus data_remove_node(
+    const wchar_t *path, unsigned int depth, size_t *entry_count) {
+    HANDLE handle = INVALID_HANDLE_VALUE;
+    DWORD attributes = 0;
+    JvmanInstallStatus status;
+    if (!path || !entry_count) return JVMAN_INSTALL_INVALID_ARGUMENT;
+    if (depth > JVMAN_DATA_DELETE_DEPTH_LIMIT) {
+        return JVMAN_INSTALL_PATH_TOO_LONG;
+    }
+    if (*entry_count >= JVMAN_DATA_DELETE_ENTRY_LIMIT) {
+        return JVMAN_INSTALL_IO_ERROR;
+    }
+    ++*entry_count;
+    status = data_open_handle(path, &handle, &attributes);
+    if (status == JVMAN_INSTALL_NOT_FOUND) return JVMAN_INSTALL_OK;
+    if (status != JVMAN_INSTALL_OK) return status;
+    if ((attributes & FILE_ATTRIBUTE_DIRECTORY) != 0 &&
+        (attributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0) {
+        wchar_t directory[JVMAN_INSTALL_PATH_CHARS];
+        status = data_handle_final_path(
+            handle, directory, sizeof(directory) / sizeof(directory[0]));
+        while (status == JVMAN_INSTALL_OK) {
+            wchar_t name[JVMAN_INSTALL_PATH_CHARS];
+            wchar_t child[JVMAN_INSTALL_PATH_CHARS];
+            int found = 0;
+            status = data_next_child(
+                handle, NULL, name, sizeof(name) / sizeof(name[0]), &found);
+            if (status != JVMAN_INSTALL_OK || !found) break;
+            if (!join_path(child, sizeof(child) / sizeof(child[0]),
+                           directory, name)) {
+                status = JVMAN_INSTALL_PATH_TOO_LONG;
+                break;
+            }
+            status = data_remove_node(child, depth + 1u, entry_count);
+        }
+    }
+    if (status == JVMAN_INSTALL_OK) {
+        status = data_mark_handle_for_deletion(handle, attributes);
+    }
+    CloseHandle(handle);
+    return status;
+}
+
+JvmanInstallStatus jvman_install_remove_data(
+    const JvmanInstallPaths *paths, int remove_managed_jdks) {
+    JvmanInstallPaths normalized;
+    HANDLE root = INVALID_HANDLE_VALUE;
+    DWORD attributes = 0;
+    wchar_t directory[JVMAN_INSTALL_PATH_CHARS];
+    size_t entry_count = 0;
+    JvmanInstallStatus status;
+    if (remove_managed_jdks != 0 && remove_managed_jdks != 1) {
+        return JVMAN_INSTALL_INVALID_ARGUMENT;
+    }
+    status = validate_paths(paths, &normalized);
+    if (status != JVMAN_INSTALL_OK) return status;
+    status = data_open_handle(normalized.data_home, &root, &attributes);
+    if (status == JVMAN_INSTALL_NOT_FOUND) return JVMAN_INSTALL_OK;
+    if (status != JVMAN_INSTALL_OK) return status;
+    if ((attributes & FILE_ATTRIBUTE_DIRECTORY) == 0) {
+        CloseHandle(root);
+        return JVMAN_INSTALL_INVALID_PATH;
+    }
+    if ((attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+        CloseHandle(root);
+        return JVMAN_INSTALL_PATH_REPARSE;
+    }
+    status = data_handle_final_path(
+        root, directory, sizeof(directory) / sizeof(directory[0]));
+    while (status == JVMAN_INSTALL_OK) {
+        wchar_t name[JVMAN_INSTALL_PATH_CHARS];
+        wchar_t child[JVMAN_INSTALL_PATH_CHARS];
+        int found = 0;
+        status = data_next_child(
+            root, remove_managed_jdks ? NULL : L"jdks", name,
+            sizeof(name) / sizeof(name[0]), &found);
+        if (status != JVMAN_INSTALL_OK || !found) break;
+        if (!join_path(child, sizeof(child) / sizeof(child[0]),
+                       directory, name)) {
+            status = JVMAN_INSTALL_PATH_TOO_LONG;
+            break;
+        }
+        status = data_remove_node(child, 1u, &entry_count);
+    }
+    if (status == JVMAN_INSTALL_OK && remove_managed_jdks) {
+        status = data_mark_handle_for_deletion(root, attributes);
+    }
+    CloseHandle(root);
+    return status;
 }
 
 JvmanInstallStatus jvman_install_uninstall(

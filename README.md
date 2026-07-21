@@ -99,7 +99,7 @@ jvman-setup.exe /S [/DIR=<absolute-directory>] [/USER_PATH|/SYSTEM_PATH] [/NO_PA
 jvman-setup.exe /CONFIGURE_JAVA [/REPLACE_JAVA_HOME]
 jvman-setup.exe /DISCOVER
 jvman-setup.exe /PORTABLE /DIR=<absolute-directory>
-jvman-setup.exe /UNINSTALL [/S]
+jvman-setup.exe /UNINSTALL [/S] [/REMOVE_DATA [/REMOVE_JDKS]]
 jvman-setup.exe /HELP
 ```
 
@@ -139,9 +139,18 @@ non-silent run presents the same choices in the graphical prompts.
 `/PORTABLE /DIR=...` extracts only `jvman.exe` to the explicitly supplied
 directory. It does not create `JVMAN_HOME`, write the registry, or modify
 `PATH`/`JAVA_HOME`, and is suitable for a USB or per-project copy. The regular
-uninstaller is available from Add/Remove Programs or `/UNINSTALL`; it removes
-only files and environment entries owned by this installation. Registered JDKs,
-`JVMAN_HOME`, `jdks`, `cache`, `versions`, and `current` data are preserved.
+uninstaller is available from Add/Remove Programs or `/UNINSTALL`. Interactive
+uninstall first selects a removal scope and then shows a final destructive-
+action confirmation; `/S` is reserved for unattended use.
+
+There are three scopes. By default, uninstall removes only the program and
+environment entries owned by this installation. `/REMOVE_DATA` also deletes
+everything in `JVMAN_HOME` except the top-level `jdks` directory.
+`/REMOVE_DATA /REMOVE_JDKS` deletes the complete `JVMAN_HOME`, including JDKs
+managed by jvman; `/REMOVE_JDKS` is invalid on its own. Cleanup never follows a
+junction or symbolic link, and JDKs registered from external paths are never
+deleted. Silent data removal is destructive and should be used only after the
+caller has explicitly confirmed the selected scope.
 
 ## Quick Start
 

@@ -9,6 +9,7 @@
 #include "environment.h"
 #include "files.h"
 #include "lang.h"
+#include "resource.h"
 
 #include <windows.h>
 #include <shellapi.h>
@@ -45,6 +46,9 @@ typedef struct InstallerOptions {
     int silent;
     int portable;
     int uninstall;
+    int remove_data;
+    int remove_jdks;
+    int uninstall_scope_set;
     int add_path;
     int path_scope_set;
     JvmanEnvironmentScope path_scope;
@@ -54,6 +58,81 @@ typedef struct InstallerOptions {
     int install_dir_set;
     wchar_t install_dir[JVMAN_INSTALL_PATH_CHARS];
 } InstallerOptions;
+
+static void installer_uninstall_scope_dialog_refresh(HWND dialog) {
+    if (!dialog) return;
+    SetWindowTextW(dialog, jvman_lang_str(JVMAN_STR_APP_TITLE));
+    SetDlgItemTextW(dialog, IDC_JVMAN_UNINSTALL_SCOPE_PROMPT,
+                    jvman_lang_str(JVMAN_STR_UNINSTALL_CONFIRM));
+    SetDlgItemTextW(dialog, IDC_JVMAN_UNINSTALL_PROGRAM_ONLY,
+                    jvman_lang_str(JVMAN_STR_UNINSTALL_SCOPE_PROGRAM_ONLY));
+    SetDlgItemTextW(dialog, IDC_JVMAN_UNINSTALL_DATA,
+                    jvman_lang_str(JVMAN_STR_UNINSTALL_SCOPE_DATA));
+    SetDlgItemTextW(dialog, IDC_JVMAN_UNINSTALL_ALL,
+                    jvman_lang_str(JVMAN_STR_UNINSTALL_SCOPE_ALL));
+    SetDlgItemTextW(dialog, IDOK, jvman_lang_str(JVMAN_STR_CONFIRM));
+    SetDlgItemTextW(dialog, IDCANCEL, jvman_lang_str(JVMAN_STR_CANCEL));
+}
+
+static INT_PTR CALLBACK installer_uninstall_scope_dialog_proc(
+    HWND dialog, UINT message, WPARAM wparam, LPARAM lparam) {
+    InstallerOptions *options = (InstallerOptions *)GetWindowLongPtrW(
+        dialog, DWLP_USER);
+    switch (message) {
+        case WM_INITDIALOG: {
+            int selected = IDC_JVMAN_UNINSTALL_PROGRAM_ONLY;
+            options = (InstallerOptions *)lparam;
+            if (!options) {
+                EndDialog(dialog, -1);
+                return TRUE;
+            }
+            SetWindowLongPtrW(dialog, DWLP_USER, (LONG_PTR)options);
+            if (options->remove_jdks) selected = IDC_JVMAN_UNINSTALL_ALL;
+            else if (options->remove_data) selected = IDC_JVMAN_UNINSTALL_DATA;
+            CheckRadioButton(
+                dialog, IDC_JVMAN_UNINSTALL_PROGRAM_ONLY,
+                IDC_JVMAN_UNINSTALL_ALL, selected);
+            installer_uninstall_scope_dialog_refresh(dialog);
+            return TRUE;
+        }
+        case WM_COMMAND:
+            if (LOWORD(wparam) == IDOK) {
+                if (!options) {
+                    EndDialog(dialog, -1);
+                    return TRUE;
+                }
+                options->remove_jdks =
+                    IsDlgButtonChecked(dialog, IDC_JVMAN_UNINSTALL_ALL) ==
+                    BST_CHECKED;
+                options->remove_data = options->remove_jdks ||
+                    IsDlgButtonChecked(dialog, IDC_JVMAN_UNINSTALL_DATA) ==
+                        BST_CHECKED;
+                options->uninstall_scope_set = 1;
+                EndDialog(dialog, IDOK);
+                return TRUE;
+            }
+            if (LOWORD(wparam) == IDCANCEL) {
+                EndDialog(dialog, IDCANCEL);
+                return TRUE;
+            }
+            break;
+        case WM_CLOSE:
+            EndDialog(dialog, IDCANCEL);
+            return TRUE;
+    }
+    return FALSE;
+}
+
+static int installer_select_uninstall_scope(InstallerOptions *options) {
+    INT_PTR result;
+    if (!options) return -1;
+    result = DialogBoxParamW(
+        GetModuleHandleW(NULL), MAKEINTRESOURCEW(IDD_JVMAN_UNINSTALL_SCOPE),
+        NULL, installer_uninstall_scope_dialog_proc, (LPARAM)options);
+    if (result == IDOK) return 0;
+    if (result == IDCANCEL) return 1;
+    return -1;
+}
 
 static void installer_copy(wchar_t *out, size_t capacity, const wchar_t *value) {
     size_t length;
@@ -191,6 +270,16 @@ static int installer_parse_options(int argc, wchar_t **argv,
                    installer_is_switch(argument, L"--uninstall")) {
             if (options->uninstall) return -1;
             options->uninstall = 1;
+        } else if (installer_is_switch(argument, L"/REMOVE_DATA") ||
+                   installer_is_switch(argument, L"--remove-data")) {
+            if (options->remove_data) return -1;
+            options->remove_data = 1;
+            options->uninstall_scope_set = 1;
+        } else if (installer_is_switch(argument, L"/REMOVE_JDKS") ||
+                   installer_is_switch(argument, L"--remove-jdks")) {
+            if (options->remove_jdks) return -1;
+            options->remove_jdks = 1;
+            options->uninstall_scope_set = 1;
         } else if (installer_is_switch(argument, L"/ADD_TO_PATH") ||
                    installer_is_switch(argument, L"--add-to-path")) {
             if (options->add_path != 1) return -1;
@@ -271,6 +360,7 @@ static int installer_parse_options(int argc, wchar_t **argv,
     }
     if (options->portable && (options->uninstall || options->configure_java ||
                               options->discover || options->path_scope_set ||
+                              options->remove_data || options->remove_jdks ||
                               !options->install_dir_set)) {
         return -1;
     }
@@ -280,6 +370,11 @@ static int installer_parse_options(int argc, wchar_t **argv,
                                options->path_scope_set)) {
         return -1;
     }
+    if ((options->remove_data || options->remove_jdks) &&
+        !options->uninstall) {
+        return -1;
+    }
+    if (options->remove_jdks && !options->remove_data) return -1;
     if (!options->add_path && options->path_scope_set) return -1;
     if (options->replace_java_home && options->configure_java != 1) return -1;
     return 0;
@@ -1192,7 +1287,7 @@ install_failure:
                                    options->silent);
 }
 
-static int installer_uninstall(const InstallerOptions *options) {
+static int installer_uninstall(InstallerOptions *options) {
     JvmanInstallerMetadata metadata;
     JvmanInstallPaths paths;
     wchar_t marker[JVMAN_INSTALL_MARKER_ID_CHARS];
@@ -1202,6 +1297,8 @@ static int installer_uninstall(const InstallerOptions *options) {
     int environment_failed = 0;
     JvmanEnvironmentStatus first_environment_error = JVMAN_ENV_OK;
     int step_changed = 0;
+    const wchar_t *confirmation;
+    const wchar_t *success_message;
     JvmanEnvironmentStatus env_status;
     JvmanInstallStatus install_status;
     if (!options) return 1;
@@ -1217,9 +1314,28 @@ static int installer_uninstall(const InstallerOptions *options) {
         return installer_report(jvman_lang_str(JVMAN_STR_APP_TITLE), jvman_lang_str(JVMAN_STR_UNINSTALL_RECORD_INVALID),
                                  MB_OK | MB_ICONERROR, options->silent);
     }
-    if (!options->silent && MessageBoxW(NULL,
-            jvman_lang_str(JVMAN_STR_UNINSTALL_CONFIRM),
-            jvman_lang_str(JVMAN_STR_APP_TITLE), MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) != IDYES) {
+    if (!options->silent && !options->uninstall_scope_set) {
+        int scope_result = installer_select_uninstall_scope(options);
+        if (scope_result != 0) {
+            jvman_installer_metadata_free(&metadata);
+            if (scope_result > 0) return 0;
+            return installer_report(
+                jvman_lang_str(JVMAN_STR_APP_TITLE),
+                jvman_lang_str(JVMAN_STR_UNINSTALL_SCOPE_FAILED),
+                MB_OK | MB_ICONERROR, options->silent);
+        }
+    }
+    confirmation = options->remove_jdks
+                       ? jvman_lang_str(
+                             JVMAN_STR_UNINSTALL_CONFIRM_FINAL_ALL)
+                       : options->remove_data
+                             ? jvman_lang_str(
+                                   JVMAN_STR_UNINSTALL_CONFIRM_FINAL_DATA)
+                             : jvman_lang_str(
+                                   JVMAN_STR_UNINSTALL_CONFIRM_FINAL);
+    if (!options->silent && MessageBoxW(
+            NULL, confirmation, jvman_lang_str(JVMAN_STR_APP_TITLE),
+            MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES) {
         jvman_installer_metadata_free(&metadata);
         return 0;
     }
@@ -1290,6 +1406,19 @@ static int installer_uninstall(const InstallerOptions *options) {
     }
 
     if (changed) (void)jvman_environment_broadcast_change();
+    if (options->remove_data) {
+        install_status = jvman_install_remove_data(
+            &paths, options->remove_jdks);
+        if (install_status != JVMAN_INSTALL_OK &&
+            install_status != JVMAN_INSTALL_NOT_FOUND) {
+            jvman_installer_metadata_free(&metadata);
+            return installer_report_status(
+                jvman_lang_str(JVMAN_STR_APP_TITLE),
+                jvman_lang_str(JVMAN_STR_UNINSTALL_DATA_FAILED),
+                jvman_lang_install_status(install_status),
+                options->silent);
+        }
+    }
     install_status = jvman_install_uninstall(&paths);
     if (install_status == JVMAN_INSTALL_SELF_CLEANUP_REQUIRED) {
         if (installer_start_self_cleanup(&paths, metadata.install_id) == 0) {
@@ -1316,9 +1445,15 @@ static int installer_uninstall(const InstallerOptions *options) {
         }
     }
     jvman_installer_metadata_free(&metadata);
+    success_message = options->remove_jdks
+                          ? jvman_lang_str(JVMAN_STR_UNINSTALL_SUCCESS_ALL)
+                          : options->remove_data
+                                ? jvman_lang_str(
+                                      JVMAN_STR_UNINSTALL_SUCCESS_DATA)
+                                : jvman_lang_str(JVMAN_STR_UNINSTALL_SUCCESS);
     if (!options->silent) {
         MessageBoxW(NULL,
-            result == 0 ? jvman_lang_str(JVMAN_STR_UNINSTALL_SUCCESS)
+            result == 0 ? success_message
                         : jvman_lang_str(JVMAN_STR_UNINSTALL_PARTIAL),
             jvman_lang_str(JVMAN_STR_APP_TITLE), MB_OK | (result == 0 ? MB_ICONINFORMATION : MB_ICONWARNING));
     }
@@ -1466,7 +1601,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous,
     if (parse_result != 0) {
         installer_report(jvman_lang_str(JVMAN_STR_APP_TITLE),
                          jvman_lang_str(JVMAN_STR_INVALID_ARGS),
-                         MB_OK | MB_ICONERROR, 0);
+                         MB_OK | MB_ICONERROR, options.silent);
         LocalFree(argv);
         if (com_initialized) CoUninitialize();
         return 2;

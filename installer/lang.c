@@ -60,14 +60,30 @@ static const wchar_t *const lang_table[JVMAN_LANG_COUNT][JVMAN_STR_COUNT] = {
         [JVMAN_STR_INSTALL_SUCCESS]       = L"jvman was installed.",
         [JVMAN_STR_INSTALL_SUCCESS_PATH]  = L"jvman was installed. Open a new terminal before using the updated PATH.",
 
-        [JVMAN_STR_UNINSTALL_CONFIRM]      = L"Remove jvman from this computer?\n\n"
-                                              L"Installed JDKs and jvman data will be kept.",
+        [JVMAN_STR_UNINSTALL_CONFIRM]      = L"Choose what to remove. External registered JDK installations are never deleted.",
+        [JVMAN_STR_UNINSTALL_SCOPE_PROGRAM_ONLY]
+                                            = L"Remove the jvman program only (keep all data and JDKs)",
+        [JVMAN_STR_UNINSTALL_SCOPE_DATA]   = L"Remove the program and jvman data (keep managed JDK files)",
+        [JVMAN_STR_UNINSTALL_SCOPE_ALL]    = L"Remove the program, all jvman data, and managed JDKs",
+        [JVMAN_STR_UNINSTALL_SCOPE_FAILED] = L"Cannot open the uninstall options.",
+        [JVMAN_STR_UNINSTALL_CONFIRM_FINAL]= L"This is the final confirmation.\n\n"
+                                              L"Remove only the jvman program? Data and JDKs will be kept.",
+        [JVMAN_STR_UNINSTALL_CONFIRM_FINAL_DATA]
+                                            = L"This is the final confirmation.\n\n"
+                                              L"Remove jvman and its data? Managed JDK files under the jdks directory will be kept.",
+        [JVMAN_STR_UNINSTALL_CONFIRM_FINAL_ALL]
+                                            = L"This is the final confirmation.\n\n"
+                                              L"Permanently remove jvman, all jvman data, and every managed JDK? External registered JDKs will be kept.",
         [JVMAN_STR_UNINSTALL_RECORD_INVALID]= L"The installation record is missing or invalid.",
         [JVMAN_STR_UNINSTALL_ENV_FAILED]    = L"Cannot fully restore the Windows environment. "
                                               L"The installation was kept so you can retry.",
+        [JVMAN_STR_UNINSTALL_DATA_FAILED]   = L"Cannot safely remove the selected jvman data. "
+                                              L"The installation record was kept so you can retry.",
         [JVMAN_STR_UNINSTALL_FILES_FAILED]  = L"Cannot remove the installed files. "
                                               L"The installation record was kept so you can retry.",
         [JVMAN_STR_UNINSTALL_SUCCESS]       = L"jvman was removed. Existing JDKs and data were kept.",
+        [JVMAN_STR_UNINSTALL_SUCCESS_DATA]  = L"jvman and its data were removed. Managed JDK files were kept in the jdks directory.",
+        [JVMAN_STR_UNINSTALL_SUCCESS_ALL]   = L"jvman, its data, and all managed JDKs were removed. External registered JDKs were kept.",
         [JVMAN_STR_UNINSTALL_PARTIAL]       = L"jvman was partly removed. Restart Windows if the uninstaller is still present.",
 
         [JVMAN_STR_INVALID_ARGS]           = L"Invalid or conflicting installer arguments.",
@@ -87,7 +103,9 @@ static const wchar_t *const lang_table[JVMAN_LANG_COUNT][JVMAN_STR_COUNT] = {
                                               L"  /REPLACE_JAVA_HOME          allow replacing user JAVA_HOME\n"
                                               L"  /DISCOVER                    register discovered JDKs after install\n"
                                               L"  /PORTABLE /DIR=<path>        extract only jvman.exe\n"
-                                              L"  /UNINSTALL                   remove this installation",
+                                              L"  /UNINSTALL                   remove this installation\n"
+                                              L"  /REMOVE_DATA                 also remove data except managed JDKs\n"
+                                              L"  /REMOVE_DATA /REMOVE_JDKS    also remove managed JDKs",
     },
 
     /* JVMAN_LANG_ZH_CN — 简体中文 */
@@ -133,14 +151,30 @@ static const wchar_t *const lang_table[JVMAN_LANG_COUNT][JVMAN_STR_COUNT] = {
         [JVMAN_STR_INSTALL_SUCCESS]       = L"jvman 安装完成。",
         [JVMAN_STR_INSTALL_SUCCESS_PATH]  = L"jvman 安装完成。请打开新终端以使用更新后的 PATH。",
 
-        [JVMAN_STR_UNINSTALL_CONFIRM]      = L"确定从此计算机移除 jvman？\n\n"
-                                              L"已安装的 JDK 和 jvman 数据将保留。",
+        [JVMAN_STR_UNINSTALL_CONFIRM]      = L"请选择要移除的内容。通过外部路径注册的 JDK 永远不会被删除。",
+        [JVMAN_STR_UNINSTALL_SCOPE_PROGRAM_ONLY]
+                                            = L"仅移除 jvman 程序（保留全部数据和 JDK）",
+        [JVMAN_STR_UNINSTALL_SCOPE_DATA]   = L"移除程序和 jvman 数据（保留托管 JDK 文件）",
+        [JVMAN_STR_UNINSTALL_SCOPE_ALL]    = L"移除程序、全部 jvman 数据和托管 JDK",
+        [JVMAN_STR_UNINSTALL_SCOPE_FAILED] = L"无法打开卸载选项。",
+        [JVMAN_STR_UNINSTALL_CONFIRM_FINAL]= L"请再次确认。\n\n"
+                                              L"仅移除 jvman 程序？数据和 JDK 将保留。",
+        [JVMAN_STR_UNINSTALL_CONFIRM_FINAL_DATA]
+                                            = L"请再次确认。\n\n"
+                                              L"移除 jvman 和相关数据？jdks 目录中的托管 JDK 文件将保留。",
+        [JVMAN_STR_UNINSTALL_CONFIRM_FINAL_ALL]
+                                            = L"请再次确认。\n\n"
+                                              L"永久移除 jvman、全部数据和所有托管 JDK？通过外部路径注册的 JDK 将保留。",
         [JVMAN_STR_UNINSTALL_RECORD_INVALID]= L"安装记录缺失或无效。",
         [JVMAN_STR_UNINSTALL_ENV_FAILED]    = L"无法完全还原 Windows 环境变量。"
                                               L"安装已保留，您可以重试。",
+        [JVMAN_STR_UNINSTALL_DATA_FAILED]   = L"无法安全移除所选的 jvman 数据。"
+                                              L"安装记录已保留，您可以重试。",
         [JVMAN_STR_UNINSTALL_FILES_FAILED]  = L"无法移除已安装的文件。"
                                               L"安装记录已保留，您可以重试。",
         [JVMAN_STR_UNINSTALL_SUCCESS]       = L"jvman 已移除。已有的 JDK 和数据已保留。",
+        [JVMAN_STR_UNINSTALL_SUCCESS_DATA]  = L"jvman 和相关数据已移除。托管 JDK 文件已保留在 jdks 目录中。",
+        [JVMAN_STR_UNINSTALL_SUCCESS_ALL]   = L"jvman、相关数据和全部托管 JDK 已移除。外部注册的 JDK 已保留。",
         [JVMAN_STR_UNINSTALL_PARTIAL]       = L"jvman 已部分移除。如果卸载程序仍然存在，请重启 Windows。",
 
         [JVMAN_STR_INVALID_ARGS]           = L"安装参数无效或存在冲突。",
@@ -160,7 +194,9 @@ static const wchar_t *const lang_table[JVMAN_LANG_COUNT][JVMAN_STR_COUNT] = {
                                               L"  /REPLACE_JAVA_HOME           允许替换用户 JAVA_HOME\n"
                                               L"  /DISCOVER                    安装后注册发现的 JDK\n"
                                               L"  /PORTABLE /DIR=<路径>        仅解压 jvman.exe\n"
-                                              L"  /UNINSTALL                   移除此安装",
+                                              L"  /UNINSTALL                   移除此安装\n"
+                                              L"  /REMOVE_DATA                 同时删除托管 JDK 之外的数据\n"
+                                              L"  /REMOVE_DATA /REMOVE_JDKS    同时删除托管 JDK",
     },
 };
 
