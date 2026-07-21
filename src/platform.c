@@ -61,8 +61,36 @@ static void platform_set_error(const char *format, ...) {
 static void platform_set_windows_error(const char *action) {
     DWORD code = GetLastError();
     char message[256] = {0};
-    FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
-                   NULL, code, 0, message, (DWORD)sizeof(message), NULL);
+    HMODULE winhttp_module;
+    DWORD formatted = FormatMessageA(
+        FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+        NULL, code, 0, message, (DWORD)sizeof(message), NULL);
+    if (formatted == 0 &&
+        (winhttp_module = GetModuleHandleW(L"winhttp.dll")) != NULL) {
+        formatted = FormatMessageA(
+            FORMAT_MESSAGE_FROM_HMODULE | FORMAT_MESSAGE_IGNORE_INSERTS,
+            winhttp_module, code, 0, message, (DWORD)sizeof(message), NULL);
+    }
+    if (formatted == 0) {
+        const char *fallback = NULL;
+        switch (code) {
+            case ERROR_WINHTTP_TIMEOUT: fallback = "request timed out"; break;
+            case ERROR_WINHTTP_NAME_NOT_RESOLVED:
+                fallback = "host name could not be resolved";
+                break;
+            case ERROR_WINHTTP_CANNOT_CONNECT:
+                fallback = "cannot connect to server";
+                break;
+            case ERROR_WINHTTP_CONNECTION_ERROR:
+                fallback = "connection failed";
+                break;
+            case ERROR_WINHTTP_SECURE_FAILURE:
+                fallback = "TLS certificate or secure channel failure";
+                break;
+            default: fallback = "unknown error"; break;
+        }
+        snprintf(message, sizeof(message), "%s", fallback);
+    }
     message[strcspn(message, "\r\n")] = '\0';
     platform_set_error("%s (Windows error %lu: %s)", action,
                        (unsigned long)code, message[0] ? message : "unknown error");
@@ -71,6 +99,10 @@ static void platform_set_windows_error(const char *action) {
 
 const char *platform_last_error(void) {
     return platform_error_buffer[0] ? platform_error_buffer : "unknown platform error";
+}
+
+void platform_clear_error(void) {
+    platform_error_buffer[0] = '\0';
 }
 
 #if defined(_WIN32)
@@ -1895,6 +1927,31 @@ int platform_sha256_file(const char *path, unsigned char digest[32]) {
 #endif
 }
 
+static int platform_valid_https_url(const char *url) {
+    const char *authority_end;
+    const unsigned char *cursor;
+    size_t length;
+    if (!url) return 0;
+    length = strlen(url);
+    if (length < 9 || length >= JVMAN_PATH_MAX ||
+        strncmp(url, "https://", 8) != 0 || strchr(url, '#')) {
+        return 0;
+    }
+    authority_end = strpbrk(url + 8, "/?");
+    if (!authority_end) authority_end = url + length;
+    if (authority_end == url + 8 ||
+        memchr(url + 8, '@', (size_t)(authority_end - (url + 8))) != NULL) {
+        return 0;
+    }
+    for (cursor = (const unsigned char *)url; *cursor; ++cursor) {
+        if (*cursor <= 0x20 || *cursor == 0x7f ||
+            *cursor == '\\' || *cursor == '"') {
+            return 0;
+        }
+    }
+    return 1;
+}
+
 #if defined(_WIN32)
 static int windows_https_download(const char *url, const char *destination,
                                   size_t limit, unsigned int timeout_seconds) {
@@ -2074,14 +2131,294 @@ done:
     free(wide_url);
     return result;
 }
+
+static int windows_https_probe(const char *url, size_t sample_size,
+                               unsigned int timeout_seconds) {
+    WCHAR *wide_url = NULL;
+    URL_COMPONENTSW components;
+    WCHAR host[256];
+    WCHAR resource[2048];
+    WCHAR range_header[64];
+    HINTERNET session = NULL;
+    HINTERNET connection = NULL;
+    HINTERNET request = NULL;
+    DWORD status = 0;
+    DWORD status_size = sizeof(status);
+    DWORD redirect_policy =
+        WINHTTP_OPTION_REDIRECT_POLICY_DISALLOW_HTTPS_TO_HTTP;
+    DWORD timeout_millis = timeout_seconds * 1000u;
+    DWORD phase_timeout = timeout_millis / 4u;
+    size_t resource_length;
+    size_t total = 0;
+    uint64_t started = 0;
+    uint64_t now = 0;
+    int range_length;
+    int result = -1;
+    if (phase_timeout == 0) phase_timeout = 1u;
+    if (platform_monotonic_millis(&started) != 0) return -1;
+    if (platform_utf8_to_wide(url, &wide_url) != 0) return -1;
+    memset(&components, 0, sizeof(components));
+    components.dwStructSize = sizeof(components);
+    components.dwHostNameLength = (DWORD)-1;
+    components.dwUrlPathLength = (DWORD)-1;
+    components.dwExtraInfoLength = (DWORD)-1;
+    if (!WinHttpCrackUrl(wide_url, 0, 0, &components) ||
+        components.nScheme != INTERNET_SCHEME_HTTPS ||
+        components.dwHostNameLength == 0 ||
+        components.dwHostNameLength >= sizeof(host) / sizeof(host[0]) ||
+        components.dwUserNameLength != 0 ||
+        components.dwPasswordLength != 0) {
+        platform_set_windows_error("cannot parse HTTPS probe URL");
+        goto done;
+    }
+    memcpy(host, components.lpszHostName,
+           components.dwHostNameLength * sizeof(host[0]));
+    host[components.dwHostNameLength] = L'\0';
+    resource_length = (size_t)components.dwUrlPathLength +
+                      (size_t)components.dwExtraInfoLength;
+    if (resource_length == 0 ||
+        resource_length >= sizeof(resource) / sizeof(resource[0])) {
+        platform_set_error("HTTPS probe resource path is too long");
+        goto done;
+    }
+    memcpy(resource, components.lpszUrlPath,
+           components.dwUrlPathLength * sizeof(resource[0]));
+    if (components.dwExtraInfoLength != 0) {
+        memcpy(resource + components.dwUrlPathLength, components.lpszExtraInfo,
+               components.dwExtraInfoLength * sizeof(resource[0]));
+    }
+    resource[resource_length] = L'\0';
+    range_length = swprintf(range_header,
+                            sizeof(range_header) / sizeof(range_header[0]),
+                            L"Range: bytes=0-%llu",
+                            (unsigned long long)(sample_size - 1u));
+    if (range_length < 0 ||
+        (size_t)range_length >= sizeof(range_header) / sizeof(range_header[0])) {
+        platform_set_error("HTTPS probe range is too large");
+        goto done;
+    }
+    session = WinHttpOpen(L"jvman/" JVMAN_VERSION_W,
+                          WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+                          WINHTTP_NO_PROXY_NAME,
+                          WINHTTP_NO_PROXY_BYPASS, 0);
+    if (!session) {
+        platform_set_windows_error("cannot initialize Windows HTTPS probe");
+        goto done;
+    }
+    if (!WinHttpSetTimeouts(session, phase_timeout, phase_timeout,
+                            phase_timeout, timeout_millis)) {
+        platform_set_windows_error("cannot set HTTPS probe timeouts");
+        goto done;
+    }
+    connection = WinHttpConnect(session, host, components.nPort, 0);
+    if (!connection) {
+        platform_set_windows_error("cannot connect to HTTPS probe host");
+        goto done;
+    }
+    request = WinHttpOpenRequest(connection, L"GET", resource, NULL,
+                                 WINHTTP_NO_REFERER,
+                                 WINHTTP_DEFAULT_ACCEPT_TYPES,
+                                 WINHTTP_FLAG_SECURE);
+    if (!request ||
+        !WinHttpSetOption(request, WINHTTP_OPTION_REDIRECT_POLICY,
+                          &redirect_policy, sizeof(redirect_policy)) ||
+        !WinHttpSendRequest(request, range_header, (DWORD)-1L,
+                            WINHTTP_NO_REQUEST_DATA, 0, 0, 0) ||
+        !WinHttpReceiveResponse(request, NULL)) {
+        platform_set_windows_error("HTTPS archive probe failed");
+        goto done;
+    }
+    if (!WinHttpQueryHeaders(request,
+                             WINHTTP_QUERY_STATUS_CODE |
+                                 WINHTTP_QUERY_FLAG_NUMBER,
+                             WINHTTP_HEADER_NAME_BY_INDEX, &status,
+                             &status_size, WINHTTP_NO_HEADER_INDEX) ||
+        (status != 200u && status != 206u)) {
+        platform_set_error("HTTPS archive probe returned status %lu",
+                           (unsigned long)status);
+        goto done;
+    }
+    /* Stop at the bounded sample even when the server ignores Range. */
+    while (total < sample_size) {
+        unsigned char buffer[16u * 1024u];
+        size_t remaining = sample_size - total;
+        uint64_t elapsed;
+        uint64_t remaining_millis;
+        DWORD requested = (DWORD)(remaining < sizeof(buffer)
+                                      ? remaining : sizeof(buffer));
+        DWORD count = 0;
+        DWORD receive_timeout;
+        if (platform_monotonic_millis(&now) != 0 || now < started) goto done;
+        elapsed = now - started;
+        if (elapsed >= timeout_millis) {
+            platform_set_error("HTTPS archive probe timed out");
+            goto done;
+        }
+        remaining_millis = (uint64_t)timeout_millis - elapsed;
+        receive_timeout = remaining_millis > (uint64_t)UINT32_MAX
+                              ? UINT32_MAX : (DWORD)remaining_millis;
+        if (!WinHttpSetOption(request, WINHTTP_OPTION_RECEIVE_TIMEOUT,
+                              &receive_timeout, sizeof(receive_timeout))) {
+            platform_set_windows_error("cannot update HTTPS probe timeout");
+            goto done;
+        }
+        if (!WinHttpReadData(request, buffer, requested, &count)) {
+            platform_set_windows_error("cannot read HTTPS archive probe");
+            goto done;
+        }
+        if (count == 0) {
+            platform_set_error("HTTPS archive probe returned too little data");
+            goto done;
+        }
+        total += count;
+    }
+    result = 0;
+done:
+    if (request) WinHttpCloseHandle(request);
+    if (connection) WinHttpCloseHandle(connection);
+    if (session) WinHttpCloseHandle(session);
+    free(wide_url);
+    return result;
+}
 #endif
+
+#if !defined(_WIN32)
+static int posix_https_probe(const char *url, size_t sample_size,
+                             unsigned int timeout_seconds) {
+    char downloader[JVMAN_PATH_MAX];
+    char range_text[48];
+    char timeout_text[16];
+    char *arguments[24];
+    unsigned char buffer[16u * 1024u];
+    int pipe_fds[2] = {-1, -1};
+    int index = 0;
+    int status = 0;
+    int waited = 0;
+    int read_failed = 0;
+    int range_written;
+    int timeout_written;
+    size_t total = 0;
+    pid_t child = -1;
+    range_written = snprintf(range_text, sizeof(range_text), "0-%zu",
+                             sample_size - 1u);
+    timeout_written = snprintf(timeout_text, sizeof(timeout_text), "%u",
+                               timeout_seconds);
+    if (range_written < 0 || (size_t)range_written >= sizeof(range_text) ||
+        timeout_written < 0 ||
+        (size_t)timeout_written >= sizeof(timeout_text) ||
+        platform_find_trusted_executable("curl", downloader,
+                                         sizeof(downloader)) != 0) {
+        platform_set_error("trusted curl executable is not available");
+        return -1;
+    }
+    arguments[index++] = downloader;
+    arguments[index++] = "--disable";
+    arguments[index++] = "--fail";
+    arguments[index++] = "--location";
+    arguments[index++] = "--silent";
+    arguments[index++] = "--header";
+    arguments[index++] = "User-Agent: jvman/" JVMAN_VERSION;
+    arguments[index++] = "--connect-timeout";
+    arguments[index++] = timeout_text;
+    arguments[index++] = "--max-time";
+    arguments[index++] = timeout_text;
+    arguments[index++] = "--proto";
+    arguments[index++] = "=https";
+    arguments[index++] = "--proto-redir";
+    arguments[index++] = "=https";
+    arguments[index++] = "--range";
+    arguments[index++] = range_text;
+    arguments[index++] = (char *)url;
+    arguments[index] = NULL;
+    if (pipe(pipe_fds) != 0) {
+        platform_set_error("cannot create HTTPS probe pipe: %s",
+                           strerror(errno));
+        return -1;
+    }
+    child = fork();
+    if (child < 0) {
+        platform_set_error("cannot start HTTPS archive probe: %s",
+                           strerror(errno));
+        close(pipe_fds[0]);
+        close(pipe_fds[1]);
+        return -1;
+    }
+    if (child == 0) {
+        close(pipe_fds[0]);
+        if (dup2(pipe_fds[1], STDOUT_FILENO) < 0) _exit(127);
+        close(pipe_fds[1]);
+        execv(downloader, arguments);
+        _exit(127);
+    }
+    close(pipe_fds[1]);
+    pipe_fds[1] = -1;
+    while (total < sample_size) {
+        size_t remaining = sample_size - total;
+        size_t requested = remaining < sizeof(buffer) ? remaining : sizeof(buffer);
+        ssize_t count = read(pipe_fds[0], buffer, requested);
+        if (count < 0 && errno == EINTR) continue;
+        if (count < 0) {
+            platform_set_error("cannot read HTTPS archive probe: %s",
+                               strerror(errno));
+            read_failed = 1;
+            break;
+        }
+        if (count == 0) break;
+        total += (size_t)count;
+    }
+    close(pipe_fds[0]);
+    pipe_fds[0] = -1;
+    /* A full sample is success; curl is intentionally stopped before the archive. */
+    if (total == sample_size || read_failed) (void)kill(child, SIGKILL);
+    for (;;) {
+        pid_t wait_result = waitpid(child, &status, 0);
+        if (wait_result == child) {
+            waited = 1;
+            break;
+        }
+        if (wait_result < 0 && errno == EINTR) continue;
+        platform_set_error("cannot wait for HTTPS archive probe: %s",
+                           strerror(errno));
+        break;
+    }
+    if (pipe_fds[0] >= 0) close(pipe_fds[0]);
+    if (pipe_fds[1] >= 0) close(pipe_fds[1]);
+    if (!waited || read_failed) return -1;
+    if (total == sample_size) return 0;
+    if (WIFEXITED(status) && WEXITSTATUS(status) != 0) {
+        platform_set_error("HTTPS archive probe failed (curl exit code %d)",
+                           WEXITSTATUS(status));
+    } else if (WIFSIGNALED(status)) {
+        platform_set_error("HTTPS archive probe stopped by signal %d",
+                           WTERMSIG(status));
+    } else {
+        platform_set_error("HTTPS archive probe returned too little data");
+    }
+    return -1;
+}
+#endif
+
+int platform_https_probe(const char *url, size_t sample_size,
+                         unsigned int timeout_seconds) {
+    if (!platform_valid_https_url(url) || sample_size == 0 ||
+        sample_size > 1024u * 1024u || timeout_seconds == 0 ||
+        timeout_seconds > 60u) {
+        platform_set_error("invalid HTTPS probe request");
+        return -1;
+    }
+#if defined(_WIN32)
+    return windows_https_probe(url, sample_size, timeout_seconds);
+#else
+    return posix_https_probe(url, sample_size, timeout_seconds);
+#endif
+}
 
 int platform_https_download_timeout(const char *url, const char *destination,
                                     size_t limit, int show_progress,
                                     unsigned int timeout_seconds) {
     if (!url || !destination || limit == 0 ||
         timeout_seconds == 0 || timeout_seconds > 300u ||
-        strncmp(url, "https://", 8) != 0) {
+        !platform_valid_https_url(url)) {
         platform_set_error("invalid HTTPS download request");
         return -1;
     }

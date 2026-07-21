@@ -14,7 +14,8 @@
 #include <string.h>
 
 #define JVMAN_METADATA_LIMIT (1024u * 1024u)
-#define JVMAN_SOURCE_HEALTH_LIMIT (512u * 1024u)
+#define JVMAN_DOWNLOAD_PROBE_SIZE (64u * 1024u)
+#define JVMAN_DOWNLOAD_PROBE_TIMEOUT 15u
 #define JVMAN_JDK_ARCHIVE_LIMIT ((size_t)1024u * 1024u * 1024u)
 #define JVMAN_DOWNLOAD_SOURCE_LIMIT 64u
 #define JVMAN_CUSTOM_SOURCE_LIMIT 32u
@@ -1262,14 +1263,6 @@ static int download_metadata(const JvmanDownloadSource *source, int major,
     char original_url[2048];
     char *json = NULL;
     int result;
-    if (source->kind == JVMAN_DOWNLOAD_SOURCE_TSINGHUA) {
-        if (download_file_timeout(
-                "https://mirrors.tuna.tsinghua.edu.cn/Adoptium/",
-                metadata_path, JVMAN_SOURCE_HEALTH_LIMIT, 15u) != 0 ||
-            platform_remove_file(metadata_path) != 0) {
-            return -1;
-        }
-    }
     if (jvman_download_source_build_metadata_url(
             source, major, platform_os_name(), platform_arch_name(),
             platform_archive_extension(), metadata_url,
@@ -1360,11 +1353,17 @@ static int resolve_fastest_download_source(
             platform_monotonic_millis(&started) != 0) {
             return -1;
         }
+        platform_clear_error();
         resolved = download_metadata(
             source, major, metadata_path, candidate->url,
             sizeof(candidate->url), candidate->checksum,
             sizeof(candidate->checksum), candidate->version,
             sizeof(candidate->version));
+        if (resolved == 0) {
+            resolved = platform_https_probe(candidate->url,
+                                            JVMAN_DOWNLOAD_PROBE_SIZE,
+                                            JVMAN_DOWNLOAD_PROBE_TIMEOUT);
+        }
         if (platform_monotonic_millis(&finished) != 0 || finished < started) {
             return -1;
         }
@@ -1374,9 +1373,11 @@ static int resolve_fastest_download_source(
         probes[resolved_count - 1] = candidate->probe;
         if (resolved != 0) {
             const char *reason = platform_last_error();
+            if (strcmp(reason, "unknown platform error") == 0) {
+                reason = "invalid metadata";
+            }
             printf("  %-10s %" PRIu64 " ms, unavailable (%s)\n",
-                   source->name, elapsed,
-                   reason && *reason ? reason : "invalid metadata");
+                   source->name, elapsed, reason);
             fflush(stdout);
             continue;
         }
@@ -1552,8 +1553,9 @@ static int command_install(const JvmanContext *context, const char *version,
         }
         printf("Downloading Temurin %s...\n", exact_version);
         fflush(stdout);
+        platform_clear_error();
         if (download_file(url, archive, JVMAN_JDK_ARCHIVE_LIMIT, 1) != 0) {
-            print_error("download failed");
+            print_platform_error("download failed");
             goto cleanup;
         }
     } else {

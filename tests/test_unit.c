@@ -118,6 +118,25 @@ static void test_paths(void) {
     CHECK(!jvman_path_is_within("root/a", "root/ab"));
 }
 
+static void test_https_probe_validation(void) {
+    platform_clear_error();
+    CHECK(strcmp(platform_last_error(), "unknown platform error") == 0);
+    CHECK(platform_https_probe(NULL, 64u * 1024u, 15u) != 0);
+    CHECK(strstr(platform_last_error(), "invalid HTTPS probe request") != NULL);
+    CHECK(platform_https_probe("http://example.test/jdk.zip",
+                               64u * 1024u, 15u) != 0);
+    CHECK(platform_https_probe("https://user@example.test/jdk.zip",
+                               64u * 1024u, 15u) != 0);
+    CHECK(platform_https_probe("https://example.test/jdk.zip#fragment",
+                               64u * 1024u, 15u) != 0);
+    CHECK(platform_https_probe("https://example.test/jdk.zip",
+                               0, 15u) != 0);
+    CHECK(platform_https_probe("https://example.test/jdk.zip",
+                               1024u * 1024u + 1u, 15u) != 0);
+    CHECK(platform_https_probe("https://example.test/jdk.zip",
+                               64u * 1024u, 0) != 0);
+}
+
 static void test_json(void) {
     const char json[] =
         "[{\"binary\":{\"package\":{\"checksum\":\"abcd\","
@@ -700,6 +719,7 @@ int main(void) {
     }
     test_names();
     test_paths();
+    test_https_probe_validation();
     test_json();
     test_download_sources();
     test_foojay_json_boundaries();

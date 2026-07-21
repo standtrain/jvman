@@ -18,6 +18,7 @@ typedef int (*PlatformPathVisitor)(const char *path, const char *vendor_hint,
                                    void *userdata);
 
 const char *platform_last_error(void);
+void platform_clear_error(void);
 int platform_default_root(char *out, size_t out_size);
 int platform_absolute_path(const char *path, char *out, size_t out_size);
 int platform_mkdirs(const char *path);
@@ -46,6 +47,8 @@ int platform_https_download(const char *url, const char *destination,
 int platform_https_download_timeout(const char *url, const char *destination,
                                     size_t limit, int show_progress,
                                     unsigned int timeout_seconds);
+int platform_https_probe(const char *url, size_t sample_size,
+                         unsigned int timeout_seconds);
 int platform_current_executable(char *out, size_t out_size);
 int platform_sha256_file(const char *path, unsigned char digest[32]);
 int platform_validate_executable_image(const char *path);

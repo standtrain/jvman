@@ -206,13 +206,12 @@ and is stored in `<data-home>/sources/<name>.conf` with private permissions.
 Select another source before removing an active custom source. Do not place API
 keys or other credentials in source URLs.
 
-In `auto` mode, each install measures the complete metadata and checksum
-resolution time for every source with a short timeout, ignores unavailable
-sources, and downloads the JDK once from the fastest successful result. The
-Tsinghua source also checks the TUNA mirror itself before it can be selected.
-The benchmark does not download sample JDK archives. Metadata and package URLs
-must use HTTPS, and every remote package must include and match a SHA-256
-checksum.
+In `auto` mode, each install resolves the metadata and then reads a bounded
+64 KiB range from the final archive URL for every source. Sources whose actual
+archive host is unreachable are ignored, and the JDK is downloaded once from
+the fastest successful result. The probe follows HTTPS redirects only and
+never downloads a complete sample archive. Metadata and package URLs must use
+HTTPS, and every remote package must include and match a SHA-256 checksum.
 
 Examples:
 
