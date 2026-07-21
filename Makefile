@@ -6,9 +6,9 @@ WINDRES ?= windres
 
 ifeq ($(OS),Windows_NT)
 EXEEXT := .exe
-CPPFLAGS += -D_WIN32_WINNT=0x0601
+CPPFLAGS += -D_WIN32_WINNT=0x0601 -Iinstaller
 RESOURCE_OBJ := jvman-resource.o
-LDLIBS += -ladvapi32 -lwinhttp -lshell32
+LDLIBS += -ladvapi32 -lwinhttp -lshell32 -luser32
 else
 EXEEXT :=
 CPPFLAGS += -D_POSIX_C_SOURCE=200809L -D_XOPEN_SOURCE=700
@@ -16,8 +16,11 @@ RESOURCE_OBJ :=
 endif
 
 TARGET := jvman$(EXEEXT)
-SOURCES := src/main.c src/manager.c src/download_source.c src/discovery.c src/update.c src/platform.c src/util.c src/i18n.c src/sha256.c
-HEADERS := src/common.h src/manager.h src/download_source.h src/discovery.h src/update.h src/platform.h src/util.h src/i18n.h src/sha256.h
+SOURCES := src/main.c src/manager.c src/download_source.c src/discovery.c src/update.c src/platform.c src/util.c src/i18n.c src/sha256.c src/env_persist.c src/rc_writer.c
+ifeq ($(OS),Windows_NT)
+SOURCES += installer/environment.c installer/pathlist.c
+endif
+HEADERS := src/common.h src/manager.h src/download_source.h src/discovery.h src/update.h src/platform.h src/util.h src/i18n.h src/sha256.h src/env_persist.h src/rc_writer.h
 TEST_TARGET := test_unit$(EXEEXT)
 TEST_SOURCES := tests/test_unit.c src/download_source.c src/discovery.c src/platform.c src/util.c src/sha256.c
 UPDATE_TEST_TARGET := test_update$(EXEEXT)

@@ -15,8 +15,17 @@ add_executable(jvman
     src/util.c
     src/i18n.c
     src/sha256.c
+    src/env_persist.c
+    src/rc_writer.c
 )
-target_include_directories(jvman PRIVATE src resources)
+target_include_directories(jvman PRIVATE src resources installer)
+
+if(WIN32)
+    target_sources(jvman PRIVATE
+        installer/environment.c
+        installer/pathlist.c
+    )
+endif()
 
 if(MSVC)
     target_compile_options(jvman PRIVATE /W4 /utf-8)
@@ -293,7 +302,7 @@ if(BUILD_TESTING)
 endif()
 
 if(WIN32)
-    target_link_libraries(jvman PRIVATE advapi32 winhttp shell32)
+    target_link_libraries(jvman PRIVATE advapi32 winhttp shell32 user32)
 endif()
 
 install(TARGETS jvman RUNTIME DESTINATION bin)

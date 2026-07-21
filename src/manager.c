@@ -2,6 +2,7 @@
 
 #include "download_source.h"
 #include "discovery.h"
+#include "env_persist.h"
 #include "i18n.h"
 #include "platform.h"
 #include "sha256.h"
@@ -293,7 +294,19 @@ static int shell_resolves_selected_java(const JvmanContext *context) {
 }
 
 static void print_shell_initialization_hint(const JvmanContext *context) {
+    int owned = 0;
     if (shell_resolves_selected_java(context)) return;
+    if (jvman_persist_is_owned(context, &owned) == 0 && owned) {
+        printf("Persistent activation is already in place; new terminals and IDEs will pick up the change.\n");
+        printf("To refresh the current shell without reopening, run:\n");
+#if defined(_WIN32)
+        printf("  CMD: for /f \"delims=\" %%L in ('jvman init cmd') do @%%L\n");
+        printf("  PowerShell: jvman init powershell | Invoke-Expression\n");
+#else
+        printf("  sh: eval \"$(jvman init sh)\"\n");
+#endif
+        return;
+    }
 #if defined(_WIN32)
     printf("The selected Java is not active in this shell. A child process cannot update its parent shell. Initialize this shell once with one of:\n");
     printf("  CMD: for /f \"delims=\" %%L in ('jvman init cmd') do @%%L\n");
@@ -305,7 +318,8 @@ static void print_shell_initialization_hint(const JvmanContext *context) {
     printf("Add the same initialization to your shell startup file for future terminals.\n");
 }
 
-static int command_use(const JvmanContext *context, const char *name) {
+static int command_use(const JvmanContext *context, const char *name,
+                       int no_persist) {
     JvmanRegistration registration;
     PlatformLock lock;
     int result = 1;
@@ -325,6 +339,13 @@ static int command_use(const JvmanContext *context, const char *name) {
         goto done;
     }
     result = switch_to_registration(context, &registration);
+    if (result == 0 && !no_persist) {
+        JvmanPersistOptions persist_opts;
+        persist_opts.ctx = context;
+        persist_opts.replace_java_home = 0;
+        persist_opts.quiet = 1;
+        (void)jvman_persist_activate(&persist_opts);
+    }
 done:
     platform_lock_release(&lock);
     if (result == 0) {
@@ -1599,7 +1620,7 @@ static int extract_archive(const char *archive, const char *destination) {
 static int command_install(const JvmanContext *context, const char *version,
                            const char *name_option, const char *archive_option,
                            const char *checksum_option,
-                           const char *source_option) {
+                           const char *source_option, int no_persist) {
     char name[JVMAN_NAME_MAX + 1];
     char metadata[JVMAN_PATH_MAX] = {0};
     char archive[JVMAN_PATH_MAX] = {0};
@@ -1800,6 +1821,13 @@ static int command_install(const JvmanContext *context, const char *version,
     }
     printf("Installed %s -> %s\n", name, final_home);
     printf("Run `jvman use %s` to activate it.\n", name);
+    if (!no_persist) {
+        JvmanPersistOptions persist_opts;
+        persist_opts.ctx = context;
+        persist_opts.replace_java_home = 0;
+        persist_opts.quiet = 1;
+        (void)jvman_persist_activate(&persist_opts);
+    }
     result = 0;
 cleanup:
     if (metadata[0]) platform_remove_file(metadata);
@@ -1814,10 +1842,12 @@ static void print_usage(void) {
     jvman_i18n_puts("jvman " JVMAN_VERSION " - lightweight Java version manager");
     puts("");
     jvman_i18n_puts("Usage:");
-    jvman_i18n_puts("  jvman install <major> [--name <name>] [--sha256 <hex>] [--source <name>]");
-    jvman_i18n_puts("  jvman install <name> --archive <file> [--sha256 <hex>]");
+    jvman_i18n_puts("  jvman install <major> [--name <name>] [--sha256 <hex>] [--source <name>] [--no-persist]");
+    jvman_i18n_puts("  jvman install <name> --archive <file> [--sha256 <hex>] [--no-persist]");
     jvman_i18n_puts("  jvman add <name> <jdk-home>");
-    jvman_i18n_puts("  jvman use <name>");
+    jvman_i18n_puts("  jvman use <name> [--no-persist]");
+    jvman_i18n_puts("  jvman activate [--replace-java-home]");
+    jvman_i18n_puts("  jvman deactivate");
     jvman_i18n_puts("  jvman list");
     jvman_i18n_puts("  jvman discover [--register]");
     jvman_i18n_puts("  jvman source [--list|--reset|<name>|add <name> <HTTPS-template>|remove <name>]");
@@ -1868,6 +1898,7 @@ static int parse_install(const JvmanContext *context, int argc, char **argv) {
     const char *archive = NULL;
     const char *checksum = NULL;
     const char *source = NULL;
+    int no_persist = 0;
     int i;
     if (argc < 3) return print_error("install requires a version");
     for (i = 3; i < argc; ++i) {
@@ -1875,9 +1906,63 @@ static int parse_install(const JvmanContext *context, int argc, char **argv) {
         else if (strcmp(argv[i], "--archive") == 0 && i + 1 < argc) archive = argv[++i];
         else if (strcmp(argv[i], "--sha256") == 0 && i + 1 < argc) checksum = argv[++i];
         else if (strcmp(argv[i], "--source") == 0 && i + 1 < argc) source = argv[++i];
+        else if (strcmp(argv[i], "--no-persist") == 0) no_persist = 1;
         else return print_error("unknown or incomplete install option");
     }
-    return command_install(context, argv[2], name, archive, checksum, source);
+    return command_install(context, argv[2], name, archive, checksum, source,
+                           no_persist);
+}
+
+static int parse_use(const JvmanContext *context, int argc, char **argv) {
+    const char *name = NULL;
+    int no_persist = 0;
+    int i;
+    for (i = 2; i < argc; ++i) {
+        if (strcmp(argv[i], "--no-persist") == 0) no_persist = 1;
+        else if (!name && argv[i][0] != '-') name = argv[i];
+        else return print_error("usage: jvman use <name> [--no-persist]");
+    }
+    if (!name) return print_error("usage: jvman use <name> [--no-persist]");
+    return command_use(context, name, no_persist);
+}
+
+static int command_activate(const JvmanContext *context, int argc, char **argv) {
+    JvmanPersistOptions opts;
+    PlatformLock lock;
+    int result;
+    int i;
+    opts.ctx = context;
+    opts.replace_java_home = 0;
+    opts.quiet = 0;
+    for (i = 2; i < argc; ++i) {
+        if (strcmp(argv[i], "--replace-java-home") == 0) opts.replace_java_home = 1;
+        else if (strcmp(argv[i], "--user") == 0) { /* accepted; default scope */ }
+        else if (strcmp(argv[i], "--machine") == 0) {
+            return print_error("machine-wide activation is not implemented in the CLI; use jvman-setup.exe");
+        }
+        else return print_error("usage: jvman activate [--replace-java-home]");
+    }
+    if (acquire_lock(context, &lock) != 0) return print_platform_error("cannot lock state");
+    result = jvman_persist_activate(&opts);
+    platform_lock_release(&lock);
+    if (result == 0) {
+        int owned = 0;
+        if (jvman_persist_is_owned(context, &owned) == 0 && owned) {
+            jvman_i18n_puts("Persistent activation has been applied. New terminals and IDEs will pick up the change.");
+        }
+    }
+    return result == 0 ? 0 : 1;
+}
+
+static int command_deactivate(const JvmanContext *context, int argc, char **argv) {
+    PlatformLock lock;
+    int result;
+    (void)argv;
+    if (argc != 2) return print_error("usage: jvman deactivate");
+    if (acquire_lock(context, &lock) != 0) return print_platform_error("cannot lock state");
+    result = jvman_persist_deactivate(context);
+    platform_lock_release(&lock);
+    return result == 0 ? 0 : 1;
 }
 
 int jvman_run(JvmanContext *context, int argc, char **argv) {
@@ -1904,8 +1989,11 @@ int jvman_run(JvmanContext *context, int argc, char **argv) {
         return argc == 4 ? command_add(context, argv[2], argv[3]) :
                print_error("usage: jvman add <name> <jdk-home>");
     if (strcmp(command, "use") == 0 || strcmp(command, "default") == 0)
-        return argc == 3 ? command_use(context, argv[2]) :
-               print_error("usage: jvman use <name>");
+        return parse_use(context, argc, argv);
+    if (strcmp(command, "activate") == 0)
+        return command_activate(context, argc, argv);
+    if (strcmp(command, "deactivate") == 0)
+        return command_deactivate(context, argc, argv);
     if (strcmp(command, "list") == 0 || strcmp(command, "ls") == 0)
         return command_list(context);
     if (strcmp(command, "discover") == 0) {

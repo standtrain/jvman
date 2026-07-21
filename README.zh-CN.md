@@ -46,7 +46,7 @@ $env:Path = 'C:\msys64\ucrt64\bin;' + $env:Path
 mingw32-make.exe
 ```
 
-构建后可直接运行 `.\jvman.exe`，也可以把它放入一个用户可写且已加入 `PATH` 的目录。`jvman` 命令行不会自动修改系统 `PATH` 或 PowerShell profile；Windows 上只有 `jvman language` 会在 `HKCU\Software\jvman\Preferences` 写入当前用户语言偏好。Windows 构建还会生成可选的 `jvman-setup.exe`；Make 产物位于 `.\jvman-setup.exe`，CMake 产物位于 `<build>\jvman-setup.exe`。
+构建后可直接运行 `.\jvman.exe`，也可以把它放入一个用户可写且已加入 `PATH` 的目录。默认情况下 `jvman install` 与 `jvman use` 会自动把 `<数据目录>\current` 写入 `HKCU\Environment` 的 `JAVA_HOME` 和 `Path`（POSIX 上则写入 `~/.bashrc`、`~/.zshrc` 的 jvman 托管块），新终端与重启后的 IDE 将自动生效；已经由安装器接管的机器上，CLI 会检测到并跳过重复写入。若不希望 CLI 修改持久环境，可加 `--no-persist` 或设置环境变量 `JVMAN_NO_PERSIST=1`。Windows 上 `jvman language` 仍会在 `HKCU\Software\jvman\Preferences` 写入当前用户语言偏好。Windows 构建还会生成可选的 `jvman-setup.exe`；Make 产物位于 `.\jvman-setup.exe`，CMake 产物位于 `<build>\jvman-setup.exe`。
 
 ## Windows 安装程序
 
@@ -142,14 +142,16 @@ jvman init powershell | Invoke-Expression
 ## 命令
 
 ```text
-jvman install <主版本> [--name <名称>] [--sha256 <固定校验值>] [--source <下载源>]
-jvman install <名称> --archive <本地文件> [--sha256 <校验值>]
+jvman install <主版本> [--name <名称>] [--sha256 <固定校验值>] [--source <下载源>] [--no-persist]
+jvman install <名称> --archive <本地文件> [--sha256 <校验值>] [--no-persist]
 jvman source [--list|--reset|<下载源>]
 jvman source add <名称> <HTTPS模板>
 jvman source remove <名称>
 jvman add <名称> <JDK_HOME>
 jvman discover [--register]
-jvman use <名称>
+jvman use <名称> [--no-persist]
+jvman activate [--replace-java-home]
+jvman deactivate
 jvman list
 jvman current
 jvman which [名称]
@@ -166,6 +168,15 @@ jvman home
 别名：`ls` 等同于 `list`，`default` 等同于 `use`。为保持兼容，
 `jvman uninstall <名称>` 仍等同于 `jvman remove <名称>`；不带名称时，
 `jvman uninstall` 会启动 Windows 已注册的卸载程序。
+
+`jvman activate` 与 `jvman deactivate` 显式管理 CLI 的持久激活。Windows 上会
+把 `<数据目录>\current` 写入或从 `HKCU\Environment` 的 `JAVA_HOME` 与 `Path`
+中移除，并广播 `WM_SETTINGCHANGE`；状态与安装器共享 `HKCU\Software\jvman\Installer`
+键，因此 `jvman-setup.exe /UNINSTALL` 也能干净回滚 CLI 写的条目。POSIX 上则会
+在 `~/.bashrc`、`~/.zshrc` 里追加/移除 jvman 托管块（marker 之间调用 `eval
+"$(jvman init sh)"`）。`jvman install` 与 `jvman use` 默认会调用一次 activate；
+如果 `JAVA_HOME` 已被其他程序设置为不同值，需要显式使用 `--replace-java-home`
+才会覆盖。`--no-persist` 或环境变量 `JVMAN_NO_PERSIST=1` 会跳过本次持久化。
 
 `jvman language` 显示当前界面语言。Windows 上可用 `jvman language en` 或
 `jvman language zh-CN` 保存当前用户偏好；`JVMAN_LANG=en` 和
