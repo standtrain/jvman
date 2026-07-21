@@ -59,7 +59,8 @@ mingw32-make.exe
 | 安装器状态 | `HKCU\Software\jvman\Installer` |
 
 非静默运行会先显示由安装器内置语言表动态生成的语言下拉框。
-初始项跟随 Windows 界面语言；取消选择时保留该默认语言。
+默认选中“跟随系统”，并根据 Windows 界面语言决定实际界面；也可显式选择
+English 或简体中文。取消语言选择会直接退出安装程序。
 
 不带参数启动时，安装器会依次询问是否把程序目录加入 `PATH`、PATH 项写入“仅当前用户”还是“所有用户”、是否用有效的 `current` JDK 配置 `JAVA_HOME` 与 `current\bin`，以及是否在安装后执行 `jvman discover --register`。已有 `PATH` 项会保留，精确或规范化后的重复项不会再次加入；写入系统 `PATH` 需要以管理员身份运行安装器。
 

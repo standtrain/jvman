@@ -64,10 +64,18 @@ int main(void) {
     CHECK(wcscmp(jvman_lang_name((JvmanInstallerLang)-1), L"Unknown") == 0);
 
     CHECK(jvman_lang_set(JVMAN_LANG_EN) == 0);
+    CHECK(wcscmp(jvman_lang_str(JVMAN_STR_LANG_SYSTEM),
+                 L"System default") == 0);
     CHECK(jvman_lang_set((JvmanInstallerLang)-1) != 0);
     CHECK(wcscmp(jvman_lang_str(JVMAN_STR_APP_TITLE), L"jvman Setup") == 0);
+    CHECK(jvman_lang_set(JVMAN_LANG_ZH_CN) == 0);
+    CHECK(wcscmp(jvman_lang_str(JVMAN_STR_LANG_SYSTEM), L"跟随系统") == 0);
     CHECK(jvman_lang_str((JvmanStringId)-1)[0] == L'\0');
     CHECK(jvman_lang_str(JVMAN_STR_COUNT)[0] == L'\0');
+    jvman_lang_use_system_default();
+    CHECK(wcscmp(jvman_lang_str(JVMAN_STR_APP_TITLE), L"jvman Setup") == 0 ||
+          wcscmp(jvman_lang_str(JVMAN_STR_APP_TITLE),
+                 L"jvman 安装程序") == 0);
 
     if (failures != 0) {
         fprintf(stderr, "%d language test(s) failed\n", failures);

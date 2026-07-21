@@ -24,6 +24,7 @@ static const wchar_t *const lang_table[JVMAN_LANG_COUNT][JVMAN_STR_COUNT] = {
         [JVMAN_STR_LANG_SELECT]          = L"Interface language:",
         [JVMAN_STR_CONFIRM]              = L"OK",
         [JVMAN_STR_CANCEL]               = L"Cancel",
+        [JVMAN_STR_LANG_SYSTEM]          = L"System default",
 
         [JVMAN_STR_INSTALL_PROMPT]       = L"Install jvman for the current Windows user?\n\n"
                                             L"The default PATH option changes only your user environment.\n"
@@ -94,6 +95,7 @@ static const wchar_t *const lang_table[JVMAN_LANG_COUNT][JVMAN_STR_COUNT] = {
         [JVMAN_STR_LANG_SELECT]          = L"界面语言：",
         [JVMAN_STR_CONFIRM]              = L"确定",
         [JVMAN_STR_CANCEL]               = L"取消",
+        [JVMAN_STR_LANG_SYSTEM]          = L"跟随系统",
 
         [JVMAN_STR_INSTALL_PROMPT]       = L"为当前 Windows 用户安装 jvman？\n\n"
                                             L"默认 PATH 选项仅修改当前用户环境变量。\n"
@@ -232,22 +234,69 @@ static unsigned int jvman_lang_index(void) {
 }
 
 static int jvman_lang_dialog_selection(HWND dialog,
-                                       JvmanInstallerLang *language_out) {
+                                       unsigned int *choice_out) {
     LRESULT selection;
     LRESULT item_data;
-    if (!dialog || !language_out) return -1;
+    if (!dialog || !choice_out) return -1;
     selection = SendDlgItemMessageW(
         dialog, IDC_JVMAN_LANGUAGE_COMBO, CB_GETCURSEL, 0, 0);
     if (selection == CB_ERR) return -1;
     item_data = SendDlgItemMessageW(
         dialog, IDC_JVMAN_LANGUAGE_COMBO, CB_GETITEMDATA,
         (WPARAM)selection, 0);
-    if (item_data == CB_ERR ||
-        (unsigned int)item_data >= (unsigned int)JVMAN_LANG_COUNT) {
+    if (item_data == CB_ERR || item_data < 0 ||
+        (unsigned int)item_data > (unsigned int)JVMAN_LANG_COUNT) {
         return -1;
     }
-    *language_out = (JvmanInstallerLang)item_data;
+    *choice_out = (unsigned int)item_data;
     return 0;
+}
+
+static int jvman_lang_apply_dialog_choice(unsigned int choice) {
+    if (choice == (unsigned int)JVMAN_LANG_COUNT) {
+        jvman_lang_use_system_default();
+        return 0;
+    }
+    return jvman_lang_set((JvmanInstallerLang)choice);
+}
+
+static int jvman_lang_dialog_populate(HWND dialog, unsigned int choice) {
+    unsigned int language;
+    LRESULT selected_item = CB_ERR;
+    LRESULT item;
+    if (!dialog || choice > (unsigned int)JVMAN_LANG_COUNT ||
+        SendDlgItemMessageW(dialog, IDC_JVMAN_LANGUAGE_COMBO,
+                            CB_RESETCONTENT, 0, 0) == CB_ERR) {
+        return -1;
+    }
+    item = SendDlgItemMessageW(
+        dialog, IDC_JVMAN_LANGUAGE_COMBO, CB_ADDSTRING, 0,
+        (LPARAM)jvman_lang_str(JVMAN_STR_LANG_SYSTEM));
+    if (item == CB_ERR || item == CB_ERRSPACE ||
+        SendDlgItemMessageW(dialog, IDC_JVMAN_LANGUAGE_COMBO, CB_SETITEMDATA,
+                            (WPARAM)item, (LPARAM)JVMAN_LANG_COUNT) == CB_ERR) {
+        return -1;
+    }
+    if (choice == (unsigned int)JVMAN_LANG_COUNT) selected_item = item;
+    for (language = 0; language < (unsigned int)JVMAN_LANG_COUNT;
+         ++language) {
+        item = SendDlgItemMessageW(
+            dialog, IDC_JVMAN_LANGUAGE_COMBO, CB_ADDSTRING, 0,
+            (LPARAM)jvman_lang_name((JvmanInstallerLang)language));
+        if (item == CB_ERR || item == CB_ERRSPACE ||
+            SendDlgItemMessageW(dialog, IDC_JVMAN_LANGUAGE_COMBO,
+                                CB_SETITEMDATA, (WPARAM)item,
+                                (LPARAM)language) == CB_ERR) {
+            return -1;
+        }
+        if (choice == language) selected_item = item;
+    }
+    return selected_item == CB_ERR ||
+                   SendDlgItemMessageW(dialog, IDC_JVMAN_LANGUAGE_COMBO,
+                                       CB_SETCURSEL,
+                                       (WPARAM)selected_item, 0) == CB_ERR
+               ? -1
+               : 0;
 }
 
 static void jvman_lang_dialog_refresh(HWND dialog) {
@@ -262,27 +311,9 @@ static INT_PTR CALLBACK jvman_lang_dialog_proc(
     HWND dialog, UINT message, WPARAM wparam, LPARAM lparam) {
     switch (message) {
         case WM_INITDIALOG: {
-            unsigned int language;
-            LRESULT selected_item = CB_ERR;
             SetWindowLongPtrW(dialog, DWLP_USER, (LONG_PTR)lparam);
-            for (language = 0; language < (unsigned int)JVMAN_LANG_COUNT;
-                 ++language) {
-                LRESULT item = SendDlgItemMessageW(
-                    dialog, IDC_JVMAN_LANGUAGE_COMBO, CB_ADDSTRING, 0,
-                    (LPARAM)jvman_lang_name((JvmanInstallerLang)language));
-                if (item == CB_ERR || item == CB_ERRSPACE ||
-                    SendDlgItemMessageW(
-                        dialog, IDC_JVMAN_LANGUAGE_COMBO, CB_SETITEMDATA,
-                        (WPARAM)item, (LPARAM)language) == CB_ERR) {
-                    EndDialog(dialog, -1);
-                    return TRUE;
-                }
-                if (language == jvman_lang_index()) selected_item = item;
-            }
-            if (selected_item == CB_ERR ||
-                SendDlgItemMessageW(dialog, IDC_JVMAN_LANGUAGE_COMBO,
-                                    CB_SETCURSEL, (WPARAM)selected_item, 0) ==
-                    CB_ERR) {
+            if (jvman_lang_dialog_populate(
+                    dialog, (unsigned int)JVMAN_LANG_COUNT) != 0) {
                 EndDialog(dialog, -1);
                 return TRUE;
             }
@@ -292,17 +323,20 @@ static INT_PTR CALLBACK jvman_lang_dialog_proc(
         case WM_COMMAND:
             if (LOWORD(wparam) == IDC_JVMAN_LANGUAGE_COMBO &&
                 HIWORD(wparam) == CBN_SELCHANGE) {
-                JvmanInstallerLang selected;
-                if (jvman_lang_dialog_selection(dialog, &selected) == 0) {
-                    (void)jvman_lang_set(selected);
-                    jvman_lang_dialog_refresh(dialog);
+                unsigned int selected;
+                if (jvman_lang_dialog_selection(dialog, &selected) != 0 ||
+                    jvman_lang_apply_dialog_choice(selected) != 0 ||
+                    jvman_lang_dialog_populate(dialog, selected) != 0) {
+                    EndDialog(dialog, -1);
+                    return TRUE;
                 }
+                jvman_lang_dialog_refresh(dialog);
                 return TRUE;
             }
             if (LOWORD(wparam) == IDOK) {
-                JvmanInstallerLang selected;
+                unsigned int selected;
                 if (jvman_lang_dialog_selection(dialog, &selected) != 0 ||
-                    jvman_lang_set(selected) != 0) {
+                    jvman_lang_apply_dialog_choice(selected) != 0) {
                     MessageBeep(MB_ICONWARNING);
                     return TRUE;
                 }
@@ -329,7 +363,9 @@ static INT_PTR CALLBACK jvman_lang_dialog_proc(
 
 int jvman_lang_select_dialog(void) {
     JvmanInstallerLang original = active_lang;
-    INT_PTR result = DialogBoxParamW(
+    INT_PTR result;
+    jvman_lang_use_system_default();
+    result = DialogBoxParamW(
         GetModuleHandleW(NULL), MAKEINTRESOURCEW(IDD_JVMAN_LANGUAGE), NULL,
         jvman_lang_dialog_proc, (LPARAM)original);
     if (result == IDOK) return 0;

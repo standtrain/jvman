@@ -20,6 +20,7 @@ typedef enum JvmanStringId {
     JVMAN_STR_LANG_SELECT,
     JVMAN_STR_CONFIRM,
     JVMAN_STR_CANCEL,
+    JVMAN_STR_LANG_SYSTEM,
 
     /* 安装 GUI 对话框 */
     JVMAN_STR_INSTALL_PROMPT,

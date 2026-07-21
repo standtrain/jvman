@@ -78,8 +78,9 @@ are:
 | Registry state | `HKCU\Software\jvman\Installer` |
 
 Interactive runs begin with a language dropdown populated from the installer's
-built-in language table. The Windows UI language selects the initial option;
-canceling the dialog keeps that default.
+built-in language table. `System default` is selected initially and resolves
+from the Windows UI language; English and Simplified Chinese remain available
+as explicit overrides. Canceling the language dialog exits setup.
 
 When started without switches, the installer asks whether to add the program
 directory to `PATH`, whether those PATH entries should be written for only the
