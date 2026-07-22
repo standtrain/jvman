@@ -3764,49 +3764,70 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous,
                 jvman_lang_environment_status(env_status), options.silent);
         }
     }
-    /* 0.5.0: If the user asked for legacy Java HKLM PATH relocation, and we
-     * finished a successful user-mode install (or an uninstall for restore),
-     * spawn a narrow elevated helper. We probe the HKLM Path first (read-only,
-     * no admin needed) so we only trigger UAC when there's actually something
-     * to move. */
+    /* 0.5.0: If the user asked for legacy Java HKLM PATH relocation, run it
+     * now. Two dispatch paths keep this correct across install modes:
+     *   - Machine install: we're already inside the elevated child process,
+     *     so call the execute function directly. The main (non-elevated)
+     *     wrapper of the machine install skips this and lets the elevated
+     *     child handle it.
+     *   - User-mode install: we're a non-elevated process, so preflight the
+     *     HKLM Path (read-only, no admin needed) and only spawn the narrow
+     *     UAC helper when there's actually something to move.
+     */
     if (!options.uninstall && operation_committed && !options.portable &&
-        !options.elevated_resume && !options.machine_mode &&
         options.relocate_legacy_java == 1) {
-        JvmanEnvironmentPathSnapshot machine_path;
-        int needs_relocate = 0;
-        jvman_environment_path_snapshot_init(&machine_path);
-        if (jvman_environment_path_snapshot_capture(
-                JVMAN_ENV_SCOPE_MACHINE, &machine_path) == JVMAN_ENV_OK &&
-            machine_path.present && machine_path.value) {
-            wchar_t *reformed = NULL;
-            int reformed_changed = 0;
-            if (jvman_pathlist_move_java_family_to_end(
-                    machine_path.value, &reformed, &reformed_changed) ==
-                    JVMAN_PATHLIST_OK &&
-                reformed_changed) {
-                needs_relocate = 1;
+        int is_machine_elevated_child =
+            options.machine_mode && options.elevated_resume;
+        int is_user_main = !options.machine_mode && !options.elevated_resume;
+        if (is_machine_elevated_child || is_user_main) {
+            JvmanEnvironmentPathSnapshot machine_path;
+            int needs_relocate = 0;
+            jvman_environment_path_snapshot_init(&machine_path);
+            if (jvman_environment_path_snapshot_capture(
+                    JVMAN_ENV_SCOPE_MACHINE, &machine_path) == JVMAN_ENV_OK &&
+                machine_path.present && machine_path.value) {
+                wchar_t *reformed = NULL;
+                int reformed_changed = 0;
+                if (jvman_pathlist_move_java_family_to_end(
+                        machine_path.value, &reformed, &reformed_changed) ==
+                        JVMAN_PATHLIST_OK &&
+                    reformed_changed) {
+                    needs_relocate = 1;
+                }
+                free(reformed);
             }
-            free(reformed);
-        }
-        jvman_environment_path_snapshot_free(&machine_path);
-        if (needs_relocate) {
-            (void)installer_spawn_java_hklm_helper(0, options.silent);
+            jvman_environment_path_snapshot_free(&machine_path);
+            if (needs_relocate) {
+                if (is_machine_elevated_child) {
+                    (void)installer_relocate_java_hklm_execute();
+                } else {
+                    (void)installer_spawn_java_hklm_helper(0, options.silent);
+                }
+            }
         }
     }
     /* Symmetric restore on uninstall: only when metadata records that we
      * previously relocated. Metadata is HKLM-scoped, readable without admin. */
-    if (options.uninstall && operation_committed && !options.portable &&
-        !options.elevated_resume) {
-        JvmanInstallerMetadata check_metadata;
-        int check_found = 0;
-        jvman_installer_metadata_init(&check_metadata);
-        if (jvman_installer_metadata_load_scoped(
-                JVMAN_ENV_SCOPE_MACHINE, &check_metadata, &check_found) ==
-                JVMAN_ENV_OK &&
-            check_found && check_metadata.legacy_java_hklm_owned) {
-            (void)installer_spawn_java_hklm_helper(1, options.silent);
+    if (options.uninstall && operation_committed && !options.portable) {
+        int is_machine_elevated_child =
+            options.machine_mode && options.elevated_resume;
+        int is_user_main = !options.machine_mode && !options.elevated_resume;
+        if (is_machine_elevated_child || is_user_main) {
+            JvmanInstallerMetadata check_metadata;
+            int check_found = 0;
+            jvman_installer_metadata_init(&check_metadata);
+            if (jvman_installer_metadata_load_scoped(
+                    JVMAN_ENV_SCOPE_MACHINE, &check_metadata, &check_found) ==
+                    JVMAN_ENV_OK &&
+                check_found && check_metadata.legacy_java_hklm_owned) {
+                if (is_machine_elevated_child) {
+                    (void)installer_restore_java_hklm_execute();
+                } else {
+                    (void)installer_spawn_java_hklm_helper(1, options.silent);
+                }
+            }
+            jvman_installer_metadata_free(&check_metadata);
         }
-        jvman_installer_metadata_free(&check_metadata);
     }
     if (!options.uninstall && result == 0 && !options.silent &&
         !options.elevated_resume) {
