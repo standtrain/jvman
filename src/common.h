@@ -3,9 +3,9 @@
 
 #include <stddef.h>
 
-#define JVMAN_VERSION "0.5.1"
-#define JVMAN_VERSION_W L"0.5.1"
-#define JVMAN_VERSION_NUMERIC 0,5,1,0
+#define JVMAN_VERSION "0.5.2"
+#define JVMAN_VERSION_W L"0.5.2"
+#define JVMAN_VERSION_NUMERIC 0,5,2,0
 #define JVMAN_PATH_MAX 4096
 #define JVMAN_NAME_MAX 80
 #define JVMAN_LINE_MAX 8192

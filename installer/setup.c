@@ -198,6 +198,51 @@ static int installer_select_uninstall_scope(InstallerOptions *options) {
     return -1;
 }
 
+/*
+ * 0.5.2: Modeless "working, please wait" window with a marquee progress bar.
+ * Shown while the installer's real work runs so users see something between
+ * the UAC prompt and the final success message. Message pump is drained
+ * here so the marquee animation keeps flowing during synchronous file IO.
+ */
+static HWND installer_show_progress_window(int silent, int uninstall) {
+    HWND dialog;
+    HWND progress_bar;
+    if (silent) return NULL;
+    dialog = CreateDialogParamW(GetModuleHandleW(NULL),
+                                MAKEINTRESOURCEW(IDD_JVMAN_PROGRESS), NULL,
+                                NULL, 0);
+    if (!dialog) return NULL;
+    SetWindowTextW(dialog, jvman_lang_str(JVMAN_STR_APP_TITLE));
+    SetDlgItemTextW(dialog, IDC_JVMAN_PROGRESS_TEXT,
+                    jvman_lang_str(uninstall
+                                       ? JVMAN_STR_PROGRESS_UNINSTALLING
+                                       : JVMAN_STR_PROGRESS_INSTALLING));
+    progress_bar = GetDlgItem(dialog, IDC_JVMAN_PROGRESS_BAR);
+    if (progress_bar) {
+        SendMessageW(progress_bar, PBM_SETMARQUEE, TRUE, 50);
+    }
+    ShowWindow(dialog, SW_SHOWNORMAL);
+    UpdateWindow(dialog);
+    return dialog;
+}
+
+static void installer_pump_progress_window(HWND dialog) {
+    MSG message;
+    if (!dialog) return;
+    while (PeekMessageW(&message, NULL, 0, 0, PM_REMOVE)) {
+        if (!IsDialogMessageW(dialog, &message)) {
+            TranslateMessage(&message);
+            DispatchMessageW(&message);
+        }
+    }
+}
+
+static void installer_close_progress_window(HWND dialog) {
+    if (!dialog) return;
+    installer_pump_progress_window(dialog);
+    DestroyWindow(dialog);
+}
+
 static int installer_confirm_uninstall(InstallerOptions *options) {
     const wchar_t *confirmation;
     int scope_result;
@@ -1858,8 +1903,35 @@ static int installer_cleanup_worker(int argc, wchar_t **argv) {
         (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0 &&
         !RemoveDirectoryW(paths.install_dir)) {
         DWORD error = GetLastError();
-        if (error != ERROR_DIR_NOT_EMPTY && error != ERROR_FILE_NOT_FOUND &&
-            error != ERROR_PATH_NOT_FOUND) {
+        if (error == ERROR_DIR_NOT_EMPTY) {
+            /* The still-running cleanup helper lives inside this directory
+             * on machine installs. NTFS may not have reclaimed its entry
+             * yet, so a synchronous RemoveDirectory can fail with
+             * ERROR_DIR_NOT_EMPTY. Retry a few times with a small pause to
+             * let the ADS-renamed helper drop out of the directory index,
+             * then fall back to MoveFileEx MOVEFILE_DELAY_UNTIL_REBOOT so
+             * the empty directory is removed at the next boot rather than
+             * left as debris. */
+            unsigned int retry;
+            int removed = 0;
+            for (retry = 0; retry < 5u; ++retry) {
+                Sleep(200);
+                if (RemoveDirectoryW(paths.install_dir)) {
+                    removed = 1;
+                    break;
+                }
+                error = GetLastError();
+                if (error != ERROR_DIR_NOT_EMPTY &&
+                    error != ERROR_SHARING_VIOLATION) {
+                    break;
+                }
+            }
+            if (!removed) {
+                (void)MoveFileExW(paths.install_dir, NULL,
+                                   MOVEFILE_DELAY_UNTIL_REBOOT);
+            }
+        } else if (error != ERROR_FILE_NOT_FOUND &&
+                   error != ERROR_PATH_NOT_FOUND) {
             goto done;
         }
     }
@@ -3709,9 +3781,13 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous,
         installer_accept_legacy_cleanup(&options);
     }
     if (options.uninstall) {
+        HWND progress = installer_show_progress_window(options.silent, 1);
         result = installer_uninstall(&options);
+        installer_close_progress_window(progress);
     } else {
+        HWND progress = installer_show_progress_window(options.silent, 0);
         result = installer_install(&options);
+        installer_close_progress_window(progress);
     }
     operation_committed = result == 0 ||
                           (!options.uninstall && result == 2);

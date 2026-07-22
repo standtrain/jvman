@@ -87,6 +87,8 @@ static const wchar_t *const lang_table[JVMAN_LANG_COUNT][JVMAN_STR_COUNT] = {
         [JVMAN_STR_UNINSTALL_SUCCESS_ALL]   = L"jvman, its data, and all managed JDKs were removed. External registered JDKs were kept.",
         [JVMAN_STR_UNINSTALL_PARTIAL]       = L"jvman was partly removed. Restart Windows if the uninstaller is still present.",
         [JVMAN_STR_LEGACY_JAVA_HKLM_RELOCATED] = L"System PATH Java entries were moved to the tail so jvman takes precedence. New terminals will use the selected JDK.",
+        [JVMAN_STR_PROGRESS_INSTALLING]        = L"Installing jvman, please wait...",
+        [JVMAN_STR_PROGRESS_UNINSTALLING]      = L"Uninstalling jvman, please wait...",
 
         [JVMAN_STR_INVALID_ARGS]           = L"Invalid or conflicting installer arguments.",
         [JVMAN_STR_ALREADY_RUNNING]        = L"Another jvman Setup instance is already running.",
@@ -182,6 +184,8 @@ static const wchar_t *const lang_table[JVMAN_LANG_COUNT][JVMAN_STR_COUNT] = {
         [JVMAN_STR_UNINSTALL_SUCCESS_ALL]   = L"jvman、相关数据和全部托管 JDK 已移除。外部注册的 JDK 已保留。",
         [JVMAN_STR_UNINSTALL_PARTIAL]       = L"jvman 已部分移除。如果卸载程序仍然存在，请重启 Windows。",
         [JVMAN_STR_LEGACY_JAVA_HKLM_RELOCATED] = L"系统 PATH 中的旧 Java 条目已移至末尾，jvman 的 JAVA_HOME 已优先。新终端将使用所选 JDK。",
+        [JVMAN_STR_PROGRESS_INSTALLING]        = L"正在安装 jvman，请稍候……",
+        [JVMAN_STR_PROGRESS_UNINSTALLING]      = L"正在卸载 jvman，请稍候……",
 
         [JVMAN_STR_INVALID_ARGS]           = L"安装参数无效或存在冲突。",
         [JVMAN_STR_ALREADY_RUNNING]        = L"另一个 jvman 安装程序已在运行。",
