@@ -46,6 +46,17 @@ JvmanPathListStatus jvman_pathlist_remove(const wchar_t *path_value,
                                           wchar_t **result_out,
                                           int *changed_out);
 
+/*
+ * Legacy Java system PATH cleanup: recognize entries that belong to a known
+ * JDK/JRE distribution (Oracle, Adoptium, Corretto, Zulu, Semeru, Microsoft
+ * OpenJDK, Red Hat OpenJDK, BellSoft Liberica, OpenJDK) and reorder them to
+ * the tail so jvman-managed entries take precedence. Entries whose normalized
+ * form contains the "\jvman\" segment are never touched. The rewrite is
+ * stable: relative order within each group is retained.
+ */
+JvmanPathListStatus jvman_pathlist_move_java_family_to_end(
+    const wchar_t *path_value, wchar_t **result_out, int *changed_out);
+
 const wchar_t *jvman_pathlist_status_message(JvmanPathListStatus status);
 
 #endif

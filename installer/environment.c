@@ -46,6 +46,12 @@ static int valid_environment_scope(uint32_t scope) {
 #define JVMAN_VALUE_JAVA_HOME_PRIOR_VALUE L"JavaHomePriorValue"
 #define JVMAN_VALUE_JAVA_HOME_MANAGED_VALUE L"JavaHomeManagedValue"
 
+#define JVMAN_VALUE_LEGACY_JAVA_HKLM_OWNED L"LegacyJavaHklmOwned"
+#define JVMAN_VALUE_LEGACY_JAVA_HKLM_PRIOR_PRESENT L"LegacyJavaHklmPriorPresent"
+#define JVMAN_VALUE_LEGACY_JAVA_HKLM_PRIOR_TYPE L"LegacyJavaHklmPriorType"
+#define JVMAN_VALUE_LEGACY_JAVA_HKLM_PRIOR_VALUE L"LegacyJavaHklmPriorValue"
+#define JVMAN_VALUE_LEGACY_JAVA_HKLM_MANAGED_VALUE L"LegacyJavaHklmManagedValue"
+
 #define JVMAN_VALUE_DISPLAY_NAME L"DisplayName"
 #define JVMAN_VALUE_DISPLAY_VERSION L"DisplayVersion"
 #define JVMAN_VALUE_INSTALL_LOCATION L"InstallLocation"
@@ -491,6 +497,34 @@ static JvmanEnvironmentStatus metadata_validate(
                                            JVMAN_ENV_VALUE_MAX_CHARS);
         if (status != JVMAN_ENV_OK) return status;
     }
+    if ((metadata->legacy_java_hklm_owned != 0 &&
+         metadata->legacy_java_hklm_owned != 1) ||
+        (metadata->legacy_java_hklm_prior_present != 0 &&
+         metadata->legacy_java_hklm_prior_present != 1)) {
+        return JVMAN_ENV_METADATA_INVALID;
+    }
+    if (metadata->legacy_java_hklm_prior_present &&
+        !valid_environment_type(metadata->legacy_java_hklm_prior_type)) {
+        return JVMAN_ENV_METADATA_INVALID;
+    }
+    if (!metadata->legacy_java_hklm_prior_present &&
+        metadata->legacy_java_hklm_prior_type != 0u) {
+        return JVMAN_ENV_METADATA_INVALID;
+    }
+    if (metadata->legacy_java_hklm_prior_value) {
+        status = validate_environment_text(
+            metadata->legacy_java_hklm_prior_value,
+            JVMAN_ENV_VALUE_MAX_CHARS);
+        if (status != JVMAN_ENV_OK) return status;
+    } else if (metadata->legacy_java_hklm_prior_present) {
+        return JVMAN_ENV_METADATA_INVALID;
+    }
+    if (metadata->legacy_java_hklm_managed_value) {
+        status = validate_environment_text(
+            metadata->legacy_java_hklm_managed_value,
+            JVMAN_ENV_VALUE_MAX_CHARS);
+        if (status != JVMAN_ENV_OK) return status;
+    }
     if (metadata->java_home_owned && !metadata->java_home_managed_value) {
         return JVMAN_ENV_METADATA_INVALID;
     }
@@ -542,7 +576,12 @@ static JvmanEnvironmentStatus metadata_legacy_values_present(
         JVMAN_VALUE_JAVA_HOME_PRIOR_PRESENT,
         JVMAN_VALUE_JAVA_HOME_PRIOR_TYPE,
         JVMAN_VALUE_JAVA_HOME_PRIOR_VALUE,
-        JVMAN_VALUE_JAVA_HOME_MANAGED_VALUE
+        JVMAN_VALUE_JAVA_HOME_MANAGED_VALUE,
+        JVMAN_VALUE_LEGACY_JAVA_HKLM_OWNED,
+        JVMAN_VALUE_LEGACY_JAVA_HKLM_PRIOR_PRESENT,
+        JVMAN_VALUE_LEGACY_JAVA_HKLM_PRIOR_TYPE,
+        JVMAN_VALUE_LEGACY_JAVA_HKLM_PRIOR_VALUE,
+        JVMAN_VALUE_LEGACY_JAVA_HKLM_MANAGED_VALUE
     };
     size_t index;
 
@@ -646,6 +685,56 @@ static JvmanEnvironmentStatus metadata_write_key(
                                            JVMAN_VALUE_JAVA_HOME_PRIOR_VALUE);
         }
     }
+
+    /* Legacy Java HKLM PATH relocation metadata. */
+    if (status == JVMAN_ENV_OK) {
+        status = write_registry_dword(
+            key, JVMAN_VALUE_LEGACY_JAVA_HKLM_OWNED,
+            (uint32_t)metadata->legacy_java_hklm_owned);
+    }
+    if (status == JVMAN_ENV_OK) {
+        status = write_registry_dword(
+            key, JVMAN_VALUE_LEGACY_JAVA_HKLM_PRIOR_PRESENT,
+            metadata->legacy_java_hklm_owned
+                ? (uint32_t)metadata->legacy_java_hklm_prior_present
+                : 0u);
+    }
+    {
+        uint32_t legacy_prior_type =
+            metadata->legacy_java_hklm_owned &&
+                    metadata->legacy_java_hklm_prior_present
+                ? metadata->legacy_java_hklm_prior_type
+                : 0u;
+        if (status == JVMAN_ENV_OK) {
+            status = write_registry_dword(
+                key, JVMAN_VALUE_LEGACY_JAVA_HKLM_PRIOR_TYPE,
+                legacy_prior_type);
+        }
+    }
+    if (status == JVMAN_ENV_OK && metadata->legacy_java_hklm_owned) {
+        status = write_registry_string(
+            key, JVMAN_VALUE_LEGACY_JAVA_HKLM_MANAGED_VALUE,
+            metadata->legacy_java_hklm_managed_value, REG_SZ,
+            JVMAN_ENV_VALUE_MAX_CHARS);
+        if (status == JVMAN_ENV_OK &&
+            metadata->legacy_java_hklm_prior_present) {
+            status = write_registry_string(
+                key, JVMAN_VALUE_LEGACY_JAVA_HKLM_PRIOR_VALUE,
+                metadata->legacy_java_hklm_prior_value, REG_SZ,
+                JVMAN_ENV_VALUE_MAX_CHARS);
+        } else if (status == JVMAN_ENV_OK) {
+            status = delete_registry_value(
+                key, JVMAN_VALUE_LEGACY_JAVA_HKLM_PRIOR_VALUE);
+        }
+    } else if (status == JVMAN_ENV_OK) {
+        status = delete_registry_value(
+            key, JVMAN_VALUE_LEGACY_JAVA_HKLM_MANAGED_VALUE);
+        if (status == JVMAN_ENV_OK) {
+            status = delete_registry_value(
+                key, JVMAN_VALUE_LEGACY_JAVA_HKLM_PRIOR_VALUE);
+        }
+    }
+
     return status;
 }
 
@@ -683,6 +772,8 @@ void jvman_installer_metadata_free(JvmanInstallerMetadata *metadata) {
     free(metadata->language);
     free(metadata->java_home_prior_value);
     free(metadata->java_home_managed_value);
+    free(metadata->legacy_java_hklm_prior_value);
+    free(metadata->legacy_java_hklm_managed_value);
     jvman_installer_metadata_init(metadata);
 }
 
@@ -921,6 +1012,54 @@ JvmanEnvironmentStatus jvman_installer_metadata_load_scoped(
             JVMAN_ENV_VALUE_MAX_CHARS, loaded.java_home_owned,
             &loaded.java_home_managed_value, &present);
     }
+    /* Legacy Java HKLM PATH relocation metadata. */
+    if (status == JVMAN_ENV_OK) {
+        status = query_registry_dword(
+            key, JVMAN_VALUE_LEGACY_JAVA_HKLM_OWNED, 0,
+            &value, &present);
+        if (status == JVMAN_ENV_OK) {
+            if (value > 1u) status = JVMAN_ENV_METADATA_INVALID;
+            else loaded.legacy_java_hklm_owned = (int)value;
+        } else if (status == JVMAN_ENV_NOT_FOUND) {
+            /* Older installations pre-0.5.0 do not have these values. */
+            loaded.legacy_java_hklm_owned = 0;
+            status = JVMAN_ENV_OK;
+        }
+    }
+    if (status == JVMAN_ENV_OK) {
+        status = query_registry_dword(
+            key, JVMAN_VALUE_LEGACY_JAVA_HKLM_PRIOR_PRESENT, 0,
+            &value, &present);
+        if (status == JVMAN_ENV_OK) {
+            if (value > 1u) status = JVMAN_ENV_METADATA_INVALID;
+            else loaded.legacy_java_hklm_prior_present = (int)value;
+        } else if (status == JVMAN_ENV_NOT_FOUND) {
+            loaded.legacy_java_hklm_prior_present = 0;
+            status = JVMAN_ENV_OK;
+        }
+    }
+    if (status == JVMAN_ENV_OK) {
+        status = query_registry_dword(
+            key, JVMAN_VALUE_LEGACY_JAVA_HKLM_PRIOR_TYPE, 0,
+            &loaded.legacy_java_hklm_prior_type, &present);
+        if (status == JVMAN_ENV_NOT_FOUND) {
+            loaded.legacy_java_hklm_prior_type = 0u;
+            status = JVMAN_ENV_OK;
+        }
+    }
+    if (status == JVMAN_ENV_OK) {
+        status = metadata_query_string(
+            key, JVMAN_VALUE_LEGACY_JAVA_HKLM_PRIOR_VALUE,
+            JVMAN_ENV_VALUE_MAX_CHARS, 0,
+            &loaded.legacy_java_hklm_prior_value, &present);
+    }
+    if (status == JVMAN_ENV_OK) {
+        status = metadata_query_string(
+            key, JVMAN_VALUE_LEGACY_JAVA_HKLM_MANAGED_VALUE,
+            JVMAN_ENV_VALUE_MAX_CHARS,
+            loaded.legacy_java_hklm_owned,
+            &loaded.legacy_java_hklm_managed_value, &present);
+    }
     if (state_key) RegCloseKey(state_key);
     RegCloseKey(root_key);
     if (status != JVMAN_ENV_OK) {
@@ -930,6 +1069,11 @@ JvmanEnvironmentStatus jvman_installer_metadata_load_scoped(
                    : status;
     }
     if (loaded.java_home_prior_present && !loaded.java_home_prior_value) {
+        jvman_installer_metadata_free(&loaded);
+        return JVMAN_ENV_METADATA_INVALID;
+    }
+    if (loaded.legacy_java_hklm_prior_present &&
+        !loaded.legacy_java_hklm_prior_value) {
         jvman_installer_metadata_free(&loaded);
         return JVMAN_ENV_METADATA_INVALID;
     }

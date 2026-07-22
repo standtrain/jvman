@@ -66,6 +66,13 @@ typedef struct JvmanInstallerMetadata {
     uint32_t java_home_prior_type;
     wchar_t *java_home_prior_value;
     wchar_t *java_home_managed_value;
+
+    /* HKLM legacy Java PATH relocation (0.5.0). */
+    int legacy_java_hklm_owned;
+    int legacy_java_hklm_prior_present;
+    uint32_t legacy_java_hklm_prior_type;
+    wchar_t *legacy_java_hklm_prior_value;
+    wchar_t *legacy_java_hklm_managed_value;
 } JvmanInstallerMetadata;
 
 const wchar_t *jvman_environment_status_message(JvmanEnvironmentStatus status);

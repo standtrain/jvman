@@ -465,3 +465,157 @@ const wchar_t *jvman_pathlist_status_message(JvmanPathListStatus status) {
         default: return L"unknown path-list error";
     }
 }
+
+/*
+ * Java-family detection: after normalize_item, look for known vendor path
+ * fragments (case-insensitive). Anything containing "\jvman\" is skipped so
+ * jvman's own managed directories are never relocated.
+ */
+static int contains_fragment_ordinal_i(const wchar_t *haystack,
+                                       size_t haystack_length,
+                                       const wchar_t *needle) {
+    size_t needle_length = wcslen(needle);
+    size_t index;
+    if (needle_length == 0u || needle_length > haystack_length) return 0;
+    for (index = 0; index + needle_length <= haystack_length; ++index) {
+        if (CompareStringOrdinal(haystack + index, (int)needle_length,
+                                 needle, (int)needle_length,
+                                 TRUE) == CSTR_EQUAL) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int normalized_is_java_family(const wchar_t *normalized) {
+    /* Distribution-specific fragments. Match is case-insensitive; each
+     * fragment intentionally starts with "\" so we anchor on a directory
+     * component instead of a random substring. */
+    static const wchar_t *const patterns[] = {
+        L"\\Java\\jdk",
+        L"\\Java\\jre",
+        L"\\Oracle\\Java\\javapath",
+        L"\\Eclipse Adoptium\\",
+        L"\\Eclipse Foundation\\",
+        L"\\Amazon Corretto\\",
+        L"\\Zulu\\zulu",
+        L"\\Semeru\\",
+        L"\\Microsoft\\jdk-",
+        L"\\Red Hat\\java-",
+        L"\\BellSoft\\Liberica",
+        L"\\OpenJDK\\"
+    };
+    size_t count = sizeof(patterns) / sizeof(patterns[0]);
+    size_t normalized_length;
+    size_t index;
+    if (!normalized) return 0;
+    normalized_length = wcslen(normalized);
+    /* Never touch jvman-managed directories. */
+    if (contains_fragment_ordinal_i(normalized, normalized_length,
+                                    L"\\jvman\\")) {
+        return 0;
+    }
+    for (index = 0; index < count; ++index) {
+        if (contains_fragment_ordinal_i(normalized, normalized_length,
+                                        patterns[index])) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static JvmanPathListStatus item_is_java_family(const wchar_t *item,
+                                               size_t item_length,
+                                               int *out) {
+    wchar_t *normalized = NULL;
+    JvmanPathListStatus status;
+    *out = 0;
+    if (item_length == 0u) return JVMAN_PATHLIST_OK;
+    status = normalize_item(item, item_length, &normalized);
+    if (status != JVMAN_PATHLIST_OK) return status;
+    if (normalized && normalized[0] != L'\0') {
+        *out = normalized_is_java_family(normalized);
+    }
+    free(normalized);
+    return JVMAN_PATHLIST_OK;
+}
+
+JvmanPathListStatus jvman_pathlist_move_java_family_to_end(
+    const wchar_t *path_value, wchar_t **result_out, int *changed_out) {
+    size_t path_length = 0u;
+    size_t bytes;
+    size_t start;
+    size_t end;
+    size_t output_length = 0u;
+    size_t appended_count = 0u;
+    int any_matched = 0;
+    int any_kept = 0;
+    wchar_t *result = NULL;
+    JvmanPathListStatus status;
+
+    if (!result_out || !changed_out) return JVMAN_PATHLIST_INVALID_ARGUMENT;
+    *result_out = NULL;
+    *changed_out = 0;
+    status = validate_path_value(path_value, &path_length);
+    if (status != JVMAN_PATHLIST_OK) return status;
+    if (!allocation_size(path_length + 1u, &bytes)) return JVMAN_PATHLIST_TOO_LONG;
+    result = (wchar_t *)malloc(bytes);
+    if (!result) return JVMAN_PATHLIST_NO_MEMORY;
+
+    /* Pass 1: copy non-Java items in original order. */
+    start = 0u;
+    for (;;) {
+        int is_java = 0;
+        size_t item_length;
+        end = start;
+        while (end < path_length && path_value[end] != L';') ++end;
+        item_length = end - start;
+        status = item_is_java_family(path_value + start, item_length, &is_java);
+        if (status != JVMAN_PATHLIST_OK) { free(result); return status; }
+        if (!is_java) {
+            if (output_length != 0u) result[output_length++] = L';';
+            if (item_length != 0u) {
+                memcpy(result + output_length, path_value + start,
+                       item_length * sizeof(wchar_t));
+                output_length += item_length;
+            }
+            any_kept = 1;
+        } else {
+            any_matched = 1;
+        }
+        if (end == path_length) break;
+        start = end + 1u;
+    }
+    /* Pass 2: append Java items after all others, preserving relative order. */
+    if (any_matched) {
+        start = 0u;
+        for (;;) {
+            int is_java = 0;
+            size_t item_length;
+            end = start;
+            while (end < path_length && path_value[end] != L';') ++end;
+            item_length = end - start;
+            status = item_is_java_family(path_value + start, item_length,
+                                         &is_java);
+            if (status != JVMAN_PATHLIST_OK) { free(result); return status; }
+            if (is_java) {
+                if (output_length != 0u || any_kept) {
+                    result[output_length++] = L';';
+                }
+                if (item_length != 0u) {
+                    memcpy(result + output_length, path_value + start,
+                           item_length * sizeof(wchar_t));
+                    output_length += item_length;
+                }
+                ++appended_count;
+            }
+            if (end == path_length) break;
+            start = end + 1u;
+        }
+    }
+    result[output_length] = L'\0';
+    (void)appended_count;
+    *changed_out = (any_matched && wcscmp(path_value, result) != 0) ? 1 : 0;
+    *result_out = result;
+    return JVMAN_PATHLIST_OK;
+}

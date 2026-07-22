@@ -9,6 +9,7 @@
 #include "environment.h"
 #include "files.h"
 #include "lang.h"
+#include "pathlist.h"
 #include "resource.h"
 
 #include <windows.h>
@@ -41,6 +42,8 @@
 #define INSTALLER_LEGACY_FLAGS_OPTION L"/_JVMAN_LEGACY_FLAGS"
 #define INSTALLER_LEGACY_CLEANUP_ONLY_SWITCH L"/_JVMAN_LEGACY_CLEANUP_ONLY"
 #define INSTALLER_LEGACY_RESTORE_ONLY_SWITCH L"/_JVMAN_LEGACY_RESTORE_ONLY"
+#define INSTALLER_JAVA_HKLM_RELOCATE_SWITCH L"/_JVMAN_JAVA_HKLM_RELOCATE_ONLY"
+#define INSTALLER_JAVA_HKLM_RESTORE_SWITCH L"/_JVMAN_JAVA_HKLM_RESTORE_ONLY"
 #define INSTALLER_UNINSTALL_CONFIRMED_SWITCH \
     L"/_JVMAN_UNINSTALL_CONFIRMED"
 #define INSTALLER_MUTEX_HANDOFF_TIMEOUT_MS 30000u
@@ -85,6 +88,11 @@ typedef struct InstallerOptions {
     int legacy_restore_only;
     int legacy_cleanup_applied;
     unsigned int legacy_cleanup_flags;
+    /* 0.5.0: opt-out flag; 1 attempts to move Java-family entries in the
+     * machine PATH to the tail after installing. -1 explicitly disables it. */
+    int relocate_legacy_java;
+    int java_hklm_relocate_only;
+    int java_hklm_restore_only;
     int language_set;
     JvmanInstallerLang language;
     int install_dir_set;
@@ -572,6 +580,7 @@ static int installer_parse_options(int argc, wchar_t **argv,
     options->add_path = 1;
     options->path_scope = JVMAN_ENV_SCOPE_USER;
     options->configure_java = 0;
+    options->relocate_legacy_java = 1;   /* opt-out: default enabled */
     if (argc < 1 || argc > INSTALLER_MAX_ARGS || !argv) return -1;
     for (index = 1; index < argc; ++index) {
         const wchar_t *argument = argv[index];
@@ -661,6 +670,23 @@ static int installer_parse_options(int argc, wchar_t **argv,
                        argument, INSTALLER_LEGACY_RESTORE_ONLY_SWITCH)) {
             if (options->legacy_restore_only) return -1;
             options->legacy_restore_only = 1;
+        } else if (installer_is_switch(argument, L"/RELOCATE_LEGACY_JAVA_PATH") ||
+                   installer_is_switch(argument, L"--relocate-legacy-java-path")) {
+            if (options->relocate_legacy_java != 1) return -1;
+            /* already the default; keep 1 for symmetry */
+            options->relocate_legacy_java = 1;
+        } else if (installer_is_switch(argument, L"/NO_RELOCATE_LEGACY_JAVA_PATH") ||
+                   installer_is_switch(argument, L"--no-relocate-legacy-java-path")) {
+            if (options->relocate_legacy_java == -1) return -1;
+            options->relocate_legacy_java = -1;
+        } else if (installer_is_switch(
+                       argument, INSTALLER_JAVA_HKLM_RELOCATE_SWITCH)) {
+            if (options->java_hklm_relocate_only) return -1;
+            options->java_hklm_relocate_only = 1;
+        } else if (installer_is_switch(
+                       argument, INSTALLER_JAVA_HKLM_RESTORE_SWITCH)) {
+            if (options->java_hklm_restore_only) return -1;
+            options->java_hklm_restore_only = 1;
         } else if (installer_is_switch(
                        argument, INSTALLER_UNINSTALL_CONFIRMED_SWITCH)) {
             if (options->uninstall_confirmed) return -1;
@@ -1231,6 +1257,50 @@ static int installer_build_elevated_parameters(
         return -1;
     }
     return 0;
+}
+
+/*
+ * 0.5.0: spawn a narrow elevated helper that only executes the HKLM legacy
+ * Java PATH relocation (is_restore=0) or its inverse (is_restore=1). No
+ * install-state parameters are transported; the helper reads HKLM/HKCU
+ * directly. Returns 0 on success, non-zero on failure or user cancel.
+ */
+static int installer_spawn_java_hklm_helper(int is_restore, int silent) {
+    wchar_t module[JVMAN_INSTALL_PATH_CHARS];
+    wchar_t directory[JVMAN_INSTALL_PATH_CHARS];
+    wchar_t parameters[128];
+    SHELLEXECUTEINFOW execute;
+    DWORD wait_result;
+    DWORD exit_code = 1u;
+    if (installer_get_trusted_self_path(
+            module, sizeof(module) / sizeof(module[0]), directory,
+            sizeof(directory) / sizeof(directory[0])) != 0) {
+        return -1;
+    }
+    if (_snwprintf_s(parameters, sizeof(parameters) / sizeof(parameters[0]),
+                     _TRUNCATE, L"%s",
+                     is_restore ? INSTALLER_JAVA_HKLM_RESTORE_SWITCH
+                                : INSTALLER_JAVA_HKLM_RELOCATE_SWITCH) < 0) {
+        return -1;
+    }
+    memset(&execute, 0, sizeof(execute));
+    execute.cbSize = sizeof(execute);
+    execute.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC;
+    execute.lpVerb = L"runas";
+    execute.lpFile = module;
+    execute.lpParameters = parameters;
+    execute.lpDirectory = directory;
+    execute.nShow = silent ? SW_HIDE : SW_SHOWNORMAL;
+    if (!ShellExecuteExW(&execute)) return -1;
+    if (!execute.hProcess) return -1;
+    wait_result = WaitForSingleObject(execute.hProcess, INFINITE);
+    if (wait_result == WAIT_OBJECT_0 &&
+        GetExitCodeProcess(execute.hProcess, &exit_code)) {
+        CloseHandle(execute.hProcess);
+        return exit_code == 0 ? 0 : -1;
+    }
+    CloseHandle(execute.hProcess);
+    return -1;
 }
 
 static int installer_run_elevated_machine(
@@ -1893,6 +1963,244 @@ static JvmanEnvironmentStatus installer_validate_legacy_paths(
         return JVMAN_ENV_TOO_LONG;
     }
     return JVMAN_ENV_OK;
+}
+
+/*
+ * 0.5.0: Move Java-family entries in the HKLM Path to the tail so a
+ * user-owned jvman entry takes precedence. Must run in the elevated helper
+ * child. Persists prior/managed snapshots to the machine metadata so the
+ * corresponding restore helper can roll back on uninstall.
+ */
+static JvmanEnvironmentStatus installer_relocate_java_hklm_execute(void) {
+    JvmanEnvironmentPathSnapshot before;
+    JvmanEnvironmentPathSnapshot expected_current;
+    JvmanEnvironmentPathSnapshot rewritten;
+    JvmanInstallerMetadata metadata;
+    JvmanPathListStatus pathlist_status;
+    JvmanEnvironmentStatus status;
+    wchar_t *rewritten_value = NULL;
+    int changed = 0;
+    int metadata_found = 0;
+    size_t rewritten_length;
+
+    jvman_environment_path_snapshot_init(&before);
+    jvman_environment_path_snapshot_init(&expected_current);
+    jvman_environment_path_snapshot_init(&rewritten);
+    jvman_installer_metadata_init(&metadata);
+
+    status = jvman_environment_path_snapshot_capture(JVMAN_ENV_SCOPE_MACHINE,
+                                                     &before);
+    if (status != JVMAN_ENV_OK) return status;
+    if (!before.present || before.byte_count == 0u || !before.value) {
+        jvman_environment_path_snapshot_free(&before);
+        return JVMAN_ENV_OK;
+    }
+
+    pathlist_status = jvman_pathlist_move_java_family_to_end(
+        before.value, &rewritten_value, &changed);
+    if (pathlist_status != JVMAN_PATHLIST_OK) {
+        jvman_environment_path_snapshot_free(&before);
+        free(rewritten_value);
+        return JVMAN_ENV_METADATA_INVALID;
+    }
+    if (!changed || !rewritten_value) {
+        free(rewritten_value);
+        jvman_environment_path_snapshot_free(&before);
+        return JVMAN_ENV_OK;
+    }
+
+    /* expected_current = clone of before, used as CAS anchor for restore. */
+    expected_current.valid = 1;
+    expected_current.present = 1;
+    expected_current.type = before.type;
+    expected_current.byte_count = before.byte_count;
+    expected_current.value = (wchar_t *)malloc(before.byte_count);
+    if (!expected_current.value) {
+        free(rewritten_value);
+        jvman_environment_path_snapshot_free(&before);
+        return JVMAN_ENV_NO_MEMORY;
+    }
+    memcpy(expected_current.value, before.value, before.byte_count);
+
+    rewritten_length = wcslen(rewritten_value);
+    rewritten.valid = 1;
+    rewritten.present = 1;
+    rewritten.type = before.type ? before.type : (uint32_t)REG_SZ;
+    rewritten.byte_count = (uint32_t)((rewritten_length + 1u) * sizeof(wchar_t));
+    rewritten.value = rewritten_value;
+    rewritten_value = NULL; /* ownership transferred to snapshot */
+
+    /* CAS write: only overwrite if HKLM Path is still equal to `before`. */
+    status = jvman_environment_path_snapshot_restore(
+        JVMAN_ENV_SCOPE_MACHINE, &rewritten, &expected_current, &changed);
+    jvman_environment_path_snapshot_free(&rewritten);
+
+    if (status != JVMAN_ENV_OK) {
+        jvman_environment_path_snapshot_free(&before);
+        jvman_environment_path_snapshot_free(&expected_current);
+        return status;
+    }
+
+    /* Persist prior + managed values to the machine metadata so uninstall
+     * can restore. Preserve existing metadata fields when loading. */
+    status = jvman_installer_metadata_load_scoped(
+        JVMAN_ENV_SCOPE_MACHINE, &metadata, &metadata_found);
+    if (status == JVMAN_ENV_NOT_FOUND) {
+        status = JVMAN_ENV_OK;
+        metadata_found = 0;
+    }
+    if (status != JVMAN_ENV_OK) goto done;
+
+    if (!metadata_found) {
+        /* Minimal metadata so metadata_validate passes. */
+        metadata.version = _wcsdup(L"legacy-java-hklm");
+        metadata.install_id = _wcsdup(L"legacy-java-hklm");
+        metadata.install_dir = _wcsdup(L"");
+        metadata.data_home = _wcsdup(L"");
+        if (!metadata.version || !metadata.install_id ||
+            !metadata.install_dir || !metadata.data_home) {
+            status = JVMAN_ENV_NO_MEMORY;
+            goto done;
+        }
+    }
+    /* If we've already been here and there's an existing managed snapshot,
+     * keep the original prior_value so repeat runs remain idempotent. */
+    if (!metadata.legacy_java_hklm_owned) {
+        metadata.legacy_java_hklm_owned = 1;
+        metadata.legacy_java_hklm_prior_present = 1;
+        metadata.legacy_java_hklm_prior_type = before.type;
+        free(metadata.legacy_java_hklm_prior_value);
+        metadata.legacy_java_hklm_prior_value = _wcsdup(before.value);
+        if (!metadata.legacy_java_hklm_prior_value) {
+            status = JVMAN_ENV_NO_MEMORY;
+            goto done;
+        }
+    }
+    free(metadata.legacy_java_hklm_managed_value);
+    metadata.legacy_java_hklm_managed_value = NULL;
+    {
+        /* Recompute the post-relocation value from the still-valid
+         * expected_current snapshot; the earlier `rewritten` snapshot's
+         * buffer was already released by path_snapshot_free above. */
+        wchar_t *reformed = NULL;
+        int reformed_changed = 0;
+        pathlist_status = jvman_pathlist_move_java_family_to_end(
+            expected_current.value, &reformed, &reformed_changed);
+        if (pathlist_status != JVMAN_PATHLIST_OK || !reformed) {
+            free(reformed);
+            status = JVMAN_ENV_METADATA_INVALID;
+            goto done;
+        }
+        metadata.legacy_java_hklm_managed_value = reformed;
+    }
+
+    status = jvman_installer_metadata_save_scoped(JVMAN_ENV_SCOPE_MACHINE,
+                                                  &metadata);
+done:
+    jvman_environment_path_snapshot_free(&before);
+    jvman_environment_path_snapshot_free(&expected_current);
+    jvman_installer_metadata_free(&metadata);
+    return status;
+}
+
+/*
+ * 0.5.0: Restore the HKLM Path to the value captured by
+ * installer_relocate_java_hklm_execute. Silently succeeds if metadata does
+ * not indicate this helper touched the path, or if the current HKLM Path no
+ * longer matches the value we wrote (user manually edited it).
+ */
+static JvmanEnvironmentStatus installer_restore_java_hklm_execute(void) {
+    JvmanInstallerMetadata metadata;
+    JvmanEnvironmentPathSnapshot expected_current;
+    JvmanEnvironmentPathSnapshot prior;
+    JvmanEnvironmentStatus status;
+    int metadata_found = 0;
+    int changed = 0;
+
+    jvman_installer_metadata_init(&metadata);
+    jvman_environment_path_snapshot_init(&expected_current);
+    jvman_environment_path_snapshot_init(&prior);
+
+    status = jvman_installer_metadata_load_scoped(
+        JVMAN_ENV_SCOPE_MACHINE, &metadata, &metadata_found);
+    if (status == JVMAN_ENV_NOT_FOUND) return JVMAN_ENV_OK;
+    if (status != JVMAN_ENV_OK) return status;
+    if (!metadata_found || !metadata.legacy_java_hklm_owned) {
+        jvman_installer_metadata_free(&metadata);
+        return JVMAN_ENV_OK;
+    }
+    if (!metadata.legacy_java_hklm_managed_value) {
+        jvman_installer_metadata_free(&metadata);
+        return JVMAN_ENV_OK;
+    }
+
+    /* expected_current = the value we wrote at relocate time. */
+    {
+        size_t managed_length = wcslen(metadata.legacy_java_hklm_managed_value);
+        expected_current.valid = 1;
+        expected_current.present = 1;
+        expected_current.type = metadata.legacy_java_hklm_prior_present
+                                    ? metadata.legacy_java_hklm_prior_type
+                                    : (uint32_t)REG_SZ;
+        expected_current.byte_count =
+            (uint32_t)((managed_length + 1u) * sizeof(wchar_t));
+        expected_current.value =
+            (wchar_t *)malloc(expected_current.byte_count);
+        if (!expected_current.value) {
+            jvman_installer_metadata_free(&metadata);
+            return JVMAN_ENV_NO_MEMORY;
+        }
+        memcpy(expected_current.value,
+               metadata.legacy_java_hklm_managed_value,
+               expected_current.byte_count);
+    }
+
+    if (metadata.legacy_java_hklm_prior_present &&
+        metadata.legacy_java_hklm_prior_value) {
+        size_t prior_length =
+            wcslen(metadata.legacy_java_hklm_prior_value);
+        prior.valid = 1;
+        prior.present = 1;
+        prior.type = metadata.legacy_java_hklm_prior_type;
+        prior.byte_count =
+            (uint32_t)((prior_length + 1u) * sizeof(wchar_t));
+        prior.value = (wchar_t *)malloc(prior.byte_count);
+        if (!prior.value) {
+            free(expected_current.value);
+            jvman_installer_metadata_free(&metadata);
+            return JVMAN_ENV_NO_MEMORY;
+        }
+        memcpy(prior.value, metadata.legacy_java_hklm_prior_value,
+               prior.byte_count);
+    } else {
+        prior.valid = 1;
+        prior.present = 0;
+        prior.type = 0u;
+        prior.byte_count = 0u;
+        prior.value = NULL;
+    }
+
+    status = jvman_environment_path_snapshot_restore(
+        JVMAN_ENV_SCOPE_MACHINE, &prior, &expected_current, &changed);
+
+    if (status == JVMAN_ENV_OK) {
+        metadata.legacy_java_hklm_owned = 0;
+        metadata.legacy_java_hklm_prior_present = 0;
+        metadata.legacy_java_hklm_prior_type = 0u;
+        free(metadata.legacy_java_hklm_prior_value);
+        metadata.legacy_java_hklm_prior_value = NULL;
+        free(metadata.legacy_java_hklm_managed_value);
+        metadata.legacy_java_hklm_managed_value = NULL;
+        (void)jvman_installer_metadata_save_scoped(JVMAN_ENV_SCOPE_MACHINE,
+                                                    &metadata);
+    }
+
+    jvman_environment_path_snapshot_free(&expected_current);
+    jvman_environment_path_snapshot_free(&prior);
+    jvman_installer_metadata_free(&metadata);
+    /* CONFLICT means user edited HKLM Path since our write; leave it alone. */
+    if (status == JVMAN_ENV_CONFLICT) return JVMAN_ENV_OK;
+    return status;
 }
 
 static JvmanEnvironmentStatus installer_restore_legacy_machine_paths(
@@ -3094,6 +3402,28 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous,
         if (com_initialized) CoUninitialize();
         return 2;
     }
+    /* 0.5.0: Independent elevated helper for HKLM legacy Java PATH relocation
+     * and its uninstall counterpart. Runs completely in the elevated child
+     * process, does not touch any other install state, and exits directly. */
+    if (options.java_hklm_relocate_only || options.java_hklm_restore_only) {
+        JvmanEnvironmentStatus helper_status;
+        if (!installer_process_is_elevated()) {
+            installer_report_status(
+                jvman_lang_str(JVMAN_STR_APP_TITLE),
+                jvman_lang_str(JVMAN_STR_CANNOT_UPDATE_ENV),
+                jvman_lang_environment_status(JVMAN_ENV_ACCESS_DENIED),
+                options.silent);
+            LocalFree(argv);
+            if (com_initialized) CoUninitialize();
+            return 2;
+        }
+        helper_status = options.java_hklm_relocate_only
+                            ? installer_relocate_java_hklm_execute()
+                            : installer_restore_java_hklm_execute();
+        LocalFree(argv);
+        if (com_initialized) CoUninitialize();
+        return helper_status == JVMAN_ENV_OK ? 0 : 2;
+    }
     if (options.elevated_resume && !installer_process_is_elevated()) {
         installer_report_status(
             jvman_lang_str(JVMAN_STR_APP_TITLE),
@@ -3433,6 +3763,50 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous,
                 jvman_lang_str(JVMAN_STR_CANNOT_UPDATE_ENV),
                 jvman_lang_environment_status(env_status), options.silent);
         }
+    }
+    /* 0.5.0: If the user asked for legacy Java HKLM PATH relocation, and we
+     * finished a successful user-mode install (or an uninstall for restore),
+     * spawn a narrow elevated helper. We probe the HKLM Path first (read-only,
+     * no admin needed) so we only trigger UAC when there's actually something
+     * to move. */
+    if (!options.uninstall && operation_committed && !options.portable &&
+        !options.elevated_resume && !options.machine_mode &&
+        options.relocate_legacy_java == 1) {
+        JvmanEnvironmentPathSnapshot machine_path;
+        int needs_relocate = 0;
+        jvman_environment_path_snapshot_init(&machine_path);
+        if (jvman_environment_path_snapshot_capture(
+                JVMAN_ENV_SCOPE_MACHINE, &machine_path) == JVMAN_ENV_OK &&
+            machine_path.present && machine_path.value) {
+            wchar_t *reformed = NULL;
+            int reformed_changed = 0;
+            if (jvman_pathlist_move_java_family_to_end(
+                    machine_path.value, &reformed, &reformed_changed) ==
+                    JVMAN_PATHLIST_OK &&
+                reformed_changed) {
+                needs_relocate = 1;
+            }
+            free(reformed);
+        }
+        jvman_environment_path_snapshot_free(&machine_path);
+        if (needs_relocate) {
+            (void)installer_spawn_java_hklm_helper(0, options.silent);
+        }
+    }
+    /* Symmetric restore on uninstall: only when metadata records that we
+     * previously relocated. Metadata is HKLM-scoped, readable without admin. */
+    if (options.uninstall && operation_committed && !options.portable &&
+        !options.elevated_resume) {
+        JvmanInstallerMetadata check_metadata;
+        int check_found = 0;
+        jvman_installer_metadata_init(&check_metadata);
+        if (jvman_installer_metadata_load_scoped(
+                JVMAN_ENV_SCOPE_MACHINE, &check_metadata, &check_found) ==
+                JVMAN_ENV_OK &&
+            check_found && check_metadata.legacy_java_hklm_owned) {
+            (void)installer_spawn_java_hklm_helper(1, options.silent);
+        }
+        jvman_installer_metadata_free(&check_metadata);
     }
     if (!options.uninstall && result == 0 && !options.silent &&
         !options.elevated_resume) {

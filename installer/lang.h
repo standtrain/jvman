@@ -67,6 +67,9 @@ typedef enum JvmanStringId {
     JVMAN_STR_UNINSTALL_SUCCESS_ALL,
     JVMAN_STR_UNINSTALL_PARTIAL,
 
+    /* 0.5.0: HKLM legacy Java PATH relocation */
+    JVMAN_STR_LEGACY_JAVA_HKLM_RELOCATED,
+
     /* 错误 */
     JVMAN_STR_INVALID_ARGS,
     JVMAN_STR_ALREADY_RUNNING,
