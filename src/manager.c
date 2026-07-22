@@ -1858,7 +1858,7 @@ static void print_usage(void) {
     jvman_i18n_puts("  jvman exec <name> [--] <command> [args...]");
     jvman_i18n_puts("  jvman init [powershell|cmd|sh]");
     jvman_i18n_puts("  jvman doctor");
-    jvman_i18n_puts("  jvman update [--check] [--version <version>]");
+    jvman_i18n_puts("  jvman update [--check] [--version <version>] [--source <name>|--source-list]");
     jvman_i18n_puts("  jvman language [--list|en|zh-CN]");
     jvman_i18n_puts("  jvman home");
 }

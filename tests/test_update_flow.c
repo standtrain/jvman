@@ -129,6 +129,22 @@ const char *platform_last_error(void) {
     return "mock platform failure";
 }
 
+void platform_clear_error(void) {
+}
+
+int platform_monotonic_millis(uint64_t *value_out) {
+    if (value_out) *value_out = 0;
+    return 0;
+}
+
+int platform_https_probe(const char *url, size_t sample_size,
+                         unsigned int timeout_seconds) {
+    (void)url;
+    (void)sample_size;
+    (void)timeout_seconds;
+    return -1;
+}
+
 const char *platform_os_name(void) {
     return "windows";
 }
@@ -322,7 +338,8 @@ int platform_publish_executable_update(const char *staged, const char *target,
 
 static void test_no_network_paths(void) {
     char *same_version[] = {
-        "jvman", "update", "--check", "--version", JVMAN_VERSION, NULL
+        "jvman", "update", "--check", "--version", JVMAN_VERSION,
+        "--source", "github", NULL
     };
     char *duplicate_check[] = {
         "jvman", "update", "--check", "--check", NULL
@@ -331,11 +348,11 @@ static void test_no_network_paths(void) {
         "jvman", "update", "--version", "--check", NULL
     };
     mock_reset(MOCK_FAIL_NONE);
-    CHECK(jvman_update_command(1, JVMAN_VERSION) == 0);
+    CHECK(jvman_update_command(1, JVMAN_VERSION, JVMAN_UPDATE_SOURCE_GITHUB) == 0);
     CHECK(mock.download_count == 0);
 
     mock_reset(MOCK_FAIL_NONE);
-    CHECK(jvman_update_run_cli(5, same_version) == 0);
+    CHECK(jvman_update_run_cli(7, same_version) == 0);
     CHECK(mock.download_count == 0);
 
     mock_reset(MOCK_FAIL_NONE);
@@ -351,20 +368,21 @@ static void test_no_network_paths(void) {
     CHECK(mock.download_count == 0);
 
     mock_reset(MOCK_FAIL_NONE);
-    CHECK(jvman_update_command(0, "0.1.0") != 0);
+    CHECK(jvman_update_command(0, "0.1.0", JVMAN_UPDATE_SOURCE_GITHUB) != 0);
     CHECK(mock.download_count == 0);
 
     mock_reset(MOCK_FAIL_NONE);
-    CHECK(jvman_update_command(0, "1.2") != 0);
+    CHECK(jvman_update_command(0, "1.2", JVMAN_UPDATE_SOURCE_GITHUB) != 0);
     CHECK(mock.download_count == 0);
 }
 
 static void test_latest_check(void) {
     char *explicit_check[] = {
-        "jvman", "update", "--check", "--version", TEST_NEW_VERSION, NULL
+        "jvman", "update", "--check", "--version", TEST_NEW_VERSION,
+        "--source", "github", NULL
     };
     mock_reset(MOCK_FAIL_NONE);
-    CHECK(jvman_update_command(1, NULL) == 0);
+    CHECK(jvman_update_command(1, NULL, JVMAN_UPDATE_SOURCE_GITHUB) == 0);
     CHECK(mock.download_count == 2);
     CHECK(mock.downloads[0].kind == MOCK_DOWNLOAD_METADATA);
     CHECK(mock.downloads[0].limit == 1024u * 1024u);
@@ -377,7 +395,7 @@ static void test_latest_check(void) {
     CHECK(mock.removed_count == 2);
 
     mock_reset(MOCK_FAIL_NONE);
-    CHECK(jvman_update_run_cli(5, explicit_check) == 0);
+    CHECK(jvman_update_run_cli(7, explicit_check) == 0);
     CHECK(mock.download_count == 1);
     CHECK(mock.downloads[0].kind == MOCK_DOWNLOAD_CHECKSUM);
     CHECK(mock.current_calls == 0);
@@ -388,7 +406,7 @@ static void test_latest_check(void) {
 static void test_successful_update(void) {
     mock_reset(MOCK_FAIL_NONE);
     mock.deferred = 1;
-    CHECK(jvman_update_command(0, "v" TEST_NEW_VERSION) == 0);
+    CHECK(jvman_update_command(0, "v" TEST_NEW_VERSION, JVMAN_UPDATE_SOURCE_GITHUB) == 0);
     CHECK(mock.download_count == 2);
     CHECK(mock.downloads[0].kind == MOCK_DOWNLOAD_CHECKSUM);
     CHECK(mock.downloads[1].kind == MOCK_DOWNLOAD_BINARY);
@@ -412,27 +430,27 @@ static void test_successful_update(void) {
 
 static void test_invalid_remote_data(void) {
     mock_reset(MOCK_FAIL_METADATA_DOWNLOAD);
-    CHECK(jvman_update_command(1, NULL) != 0);
+    CHECK(jvman_update_command(1, NULL, JVMAN_UPDATE_SOURCE_GITHUB) != 0);
     CHECK(mock.download_count == 0);
     CHECK(mock.removed_count == 1);
 
     mock_reset(MOCK_FAIL_METADATA_CONTENT);
-    CHECK(jvman_update_command(1, NULL) != 0);
+    CHECK(jvman_update_command(1, NULL, JVMAN_UPDATE_SOURCE_GITHUB) != 0);
     CHECK(mock.download_count == 1);
     CHECK(mock.removed_count == 1);
 
     mock_reset(MOCK_FAIL_CHECKSUM_CONTENT);
-    CHECK(jvman_update_command(1, TEST_NEW_VERSION) != 0);
+    CHECK(jvman_update_command(1, TEST_NEW_VERSION, JVMAN_UPDATE_SOURCE_GITHUB) != 0);
     CHECK(mock.download_count == 1);
     CHECK(mock.removed_count == 1);
 
     mock_reset(MOCK_FAIL_CHECKSUM_DOWNLOAD);
-    CHECK(jvman_update_command(1, TEST_NEW_VERSION) != 0);
+    CHECK(jvman_update_command(1, TEST_NEW_VERSION, JVMAN_UPDATE_SOURCE_GITHUB) != 0);
     CHECK(mock.download_count == 0);
     CHECK(mock.removed_count == 1);
 
     mock_reset(MOCK_FAIL_HASH);
-    CHECK(jvman_update_command(0, TEST_NEW_VERSION) != 0);
+    CHECK(jvman_update_command(0, TEST_NEW_VERSION, JVMAN_UPDATE_SOURCE_GITHUB) != 0);
     CHECK(mock.hash_calls == 2);
     CHECK(mock.image_calls == 0);
     CHECK(mock.stage_calls == 0);
@@ -441,50 +459,50 @@ static void test_invalid_remote_data(void) {
 
 static void test_failure_cleanup(void) {
     mock_reset(MOCK_FAIL_TEMPORARY);
-    CHECK(jvman_update_command(0, TEST_NEW_VERSION) != 0);
+    CHECK(jvman_update_command(0, TEST_NEW_VERSION, JVMAN_UPDATE_SOURCE_GITHUB) != 0);
     CHECK(mock.download_count == 0);
     CHECK(mock.removed_count == 0);
 
     mock_reset(MOCK_FAIL_BINARY_DOWNLOAD);
-    CHECK(jvman_update_command(0, TEST_NEW_VERSION) != 0);
+    CHECK(jvman_update_command(0, TEST_NEW_VERSION, JVMAN_UPDATE_SOURCE_GITHUB) != 0);
     CHECK(mock.removed_count == 2);
 
     mock_reset(MOCK_FAIL_IMAGE);
-    CHECK(jvman_update_command(0, TEST_NEW_VERSION) != 0);
+    CHECK(jvman_update_command(0, TEST_NEW_VERSION, JVMAN_UPDATE_SOURCE_GITHUB) != 0);
     CHECK(mock.image_calls == 1);
     CHECK(mock.stage_calls == 0);
     CHECK(mock.removed_count == 2);
 
     mock_reset(MOCK_FAIL_BINARY_VERSION);
-    CHECK(jvman_update_command(0, TEST_NEW_VERSION) != 0);
+    CHECK(jvman_update_command(0, TEST_NEW_VERSION, JVMAN_UPDATE_SOURCE_GITHUB) != 0);
     CHECK(mock.image_calls == 1);
     CHECK(mock.stage_calls == 0);
     CHECK(mock.removed_count == 2);
 
     mock_reset(MOCK_FAIL_STAGE);
-    CHECK(jvman_update_command(0, TEST_NEW_VERSION) != 0);
+    CHECK(jvman_update_command(0, TEST_NEW_VERSION, JVMAN_UPDATE_SOURCE_GITHUB) != 0);
     CHECK(mock.stage_calls == 1);
     CHECK(mock.publish_calls == 0);
     CHECK(mock.removed_count == 2);
 
     mock_reset(MOCK_FAIL_PUBLISH);
-    CHECK(jvman_update_command(0, TEST_NEW_VERSION) != 0);
+    CHECK(jvman_update_command(0, TEST_NEW_VERSION, JVMAN_UPDATE_SOURCE_GITHUB) != 0);
     CHECK(mock.publish_calls == 1);
     CHECK(mock.removed_count == 3);
     CHECK(mock_removed("mock-jvman.exe.jvman-update-1.tmp"));
 
     mock_reset(MOCK_FAIL_CURRENT);
-    CHECK(jvman_update_command(0, TEST_NEW_VERSION) != 0);
+    CHECK(jvman_update_command(0, TEST_NEW_VERSION, JVMAN_UPDATE_SOURCE_GITHUB) != 0);
     CHECK(mock.current_calls == 1);
     CHECK(mock.removed_count == 0);
 
     mock_reset(MOCK_FAIL_CURRENT_HASH);
-    CHECK(jvman_update_command(0, TEST_NEW_VERSION) != 0);
+    CHECK(jvman_update_command(0, TEST_NEW_VERSION, JVMAN_UPDATE_SOURCE_GITHUB) != 0);
     CHECK(mock.hash_calls == 1);
     CHECK(mock.removed_count == 0);
 
     mock_reset(MOCK_FAIL_STALE_IMAGE);
-    CHECK(jvman_update_command(0, TEST_NEW_VERSION) != 0);
+    CHECK(jvman_update_command(0, TEST_NEW_VERSION, JVMAN_UPDATE_SOURCE_GITHUB) != 0);
     CHECK(mock.current_calls == 1);
     CHECK(mock.hash_calls == 1);
     CHECK(mock.download_count == 0);

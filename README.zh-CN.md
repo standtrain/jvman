@@ -4,7 +4,7 @@
 
 `jvman` 是一个用 C11 编写的轻量级 Java 版本管理器。它借鉴 nvm 的使用方式，用一个原生可执行文件完成 JDK 下载、注册、切换、查询和命令隔离执行；核心代码不链接第三方运行库。
 
-本文档对应 jvman `0.3.0`。
+本文档对应 jvman `0.4.0`。
 
 首版以 Windows 10+ 为主要目标，同时保留 Linux/macOS 平台层。Windows 切换使用 NTFS directory junction，通常不需要管理员权限，也不需要开启 Developer Mode。
 
@@ -160,7 +160,7 @@ jvman uninstall
 jvman exec <名称> [--] <命令> [参数...]
 jvman init [powershell|cmd|sh]
 jvman doctor
-jvman update [--check] [--version <版本>]
+jvman update [--check] [--version <版本>] [--source <名称>|--source-list]
 jvman language [--list|en|zh-CN]
 jvman home
 ```
@@ -214,13 +214,26 @@ Windows 下 `exec` 支持从 `PATH/PATHEXT` 解析 `.exe`、`.com`、`.cmd` 和 
 ```text
 jvman update --check
 jvman update
-jvman update --version 0.3.0
+jvman update --version 0.4.0
+jvman update --source gitee                # 固定使用 gitee 镜像
+jvman update --source-list                 # 列出可用镜像
 ```
 
 不指定 `--version` 时，命令会检查 `github.com/standtrain/jvman` 的最新稳定
 Release。发现较新版本时，`--check` 会验证对应平台的校验项，但不会下载或
 替换可执行文件。显式版本会跳过最新 Release 元数据查询，且必须是
 `MAJOR.MINOR.PATCH`，可带前导 `v`；不允许降级。
+
+**下载镜像**：版本元数据始终从 GitHub API 拉取，是"最新版本号"的唯一来源；
+但 `SHA256SUMS` 与二进制资产可以从任一配置镜像下载。内置镜像：
+
+- `github` → `https://github.com/standtrain/jvman/releases/download`
+- `gitee`  → `https://gitee.com/zzpdhc/jvman/releases/download`（国内加速）
+
+`--source auto`（默认）会像 `install` 那样对每个镜像的资产 URL 做一次
+有界的 64 KiB range 采样测速，选最快的下载。任何镜像上的 Release 都必须
+使用相同的 tag（`v<主.次.补>`）与同名资产、同 SHA-256，否则 update 会在
+校验阶段拒绝该二进制。
 
 更新器只会选择固定名称的 Windows x86_64、静态 Linux x86_64 或 macOS 11+
 x86_64/aarch64 产物。下载仅使用 HTTPS，并限制元数据和二进制大小；二进制
@@ -301,7 +314,7 @@ jvman/
 
 ## 当前边界
 
-`0.3.0` 会在国际源、清华、华为、阿里云及用户自定义目录之间自动测速选源，远程安装只接受 Java 主版本。本地发现可以识别常见 JDK 厂商；`install` 与 `use` 会默认把 `JAVA_HOME` 与 `Path` 持久化到当前用户环境，可用 `--no-persist` 或 `JVMAN_NO_PERSIST=1` 关闭。托管 JRE、EA/GraalVM、复杂版本范围、项目级 `.java-version`、独立签名发布清单，以及机器范围（HKLM）CLI 激活暂不实现。
+`0.4.0` 会在国际源、清华、华为、阿里云及用户自定义目录之间自动测速选源，远程安装只接受 Java 主版本。本地发现可以识别常见 JDK 厂商；`install` 与 `use` 会默认把 `JAVA_HOME` 与 `Path` 持久化到当前用户环境，可用 `--no-persist` 或 `JVMAN_NO_PERSIST=1` 关闭。`jvman update` 现在支持 GitHub 与 gitee 两个下载镜像，`--source auto` 会像 install 那样测速再下载。托管 JRE、EA/GraalVM、复杂版本范围、项目级 `.java-version`、独立签名发布清单，以及机器范围（HKLM）CLI 激活暂不实现。
 
 远程包必须匹配所选下载源返回的 SHA-256；用户传入 `--sha256` 时还会再校验用户固定值。该校验可以发现下载损坏或包不匹配，但不等价于独立的发布签名验证。
 

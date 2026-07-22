@@ -16,11 +16,70 @@
 #define JVMAN_UPDATE_CHECKSUM_LIMIT (64u * 1024u)
 #define JVMAN_UPDATE_BINARY_LIMIT (64u * 1024u * 1024u)
 #define JVMAN_UPDATE_URL_MAX 1024u
+#define JVMAN_UPDATE_PROBE_SIZE (64u * 1024u)
+#define JVMAN_UPDATE_PROBE_TIMEOUT 15u
 
 static const char update_latest_url[] =
     "https://api.github.com/repos/standtrain/jvman/releases/latest";
 static const char update_version_marker[] =
     "\x01JVMAN-SELF-VERSION:" JVMAN_VERSION;
+
+/*
+ * Download mirrors for release assets. Metadata (latest version) is always
+ * fetched from GitHub — mirrors only serve the SHA256SUMS and binary asset
+ * at the same path layout `<base>/v<version>/<asset>`.
+ */
+typedef struct JvmanUpdateSourceEntry {
+    JvmanUpdateSource id;
+    const char *name;
+    const char *download_base;
+} JvmanUpdateSourceEntry;
+
+static const JvmanUpdateSourceEntry update_sources[] = {
+    {JVMAN_UPDATE_SOURCE_GITHUB, "github",
+     "https://github.com/standtrain/jvman/releases/download"},
+    {JVMAN_UPDATE_SOURCE_GITEE, "gitee",
+     "https://gitee.com/zzpdhc/jvman/releases/download"},
+};
+
+static const size_t update_source_count =
+    sizeof(update_sources) / sizeof(update_sources[0]);
+
+static const JvmanUpdateSourceEntry *update_source_find(
+    JvmanUpdateSource id) {
+    size_t i;
+    for (i = 0; i < update_source_count; ++i) {
+        if (update_sources[i].id == id) return &update_sources[i];
+    }
+    return NULL;
+}
+
+int jvman_update_source_parse(const char *name, JvmanUpdateSource *out) {
+    size_t i;
+    if (!name || !out) return -1;
+    if (strcmp(name, "auto") == 0) {
+        *out = JVMAN_UPDATE_SOURCE_AUTO;
+        return 0;
+    }
+    for (i = 0; i < update_source_count; ++i) {
+        if (strcmp(name, update_sources[i].name) == 0) {
+            *out = update_sources[i].id;
+            return 0;
+        }
+    }
+    return -1;
+}
+
+void jvman_update_source_list(void) {
+    size_t i;
+    jvman_i18n_puts("Update sources:");
+    jvman_i18n_printf("  %-8s %s\n", "auto",
+                      jvman_i18n_text("benchmark all mirrors and pick the fastest"));
+    for (i = 0; i < update_source_count; ++i) {
+        jvman_i18n_printf("  %-8s %s\n", update_sources[i].name,
+                          update_sources[i].download_base);
+    }
+}
 
 typedef struct JvmanJsonCursor {
     const char *cursor;
@@ -366,20 +425,18 @@ int jvman_update_parse_checksum(const char *text, size_t text_size,
     return found ? 0 : -1;
 }
 
-int jvman_update_build_release_url(const char *version, const char *asset,
+int jvman_update_build_release_url(const char *base, const char *version,
+                                   const char *asset,
                                    char *out, size_t out_size) {
     JvmanUpdateVersion parsed;
     char canonical[64];
     int written;
-    if (!out || out_size == 0 || !update_asset_allowed(asset) ||
+    if (!base || !out || out_size == 0 || !update_asset_allowed(asset) ||
         jvman_update_parse_version(version, &parsed) != 0 ||
         update_format_version(&parsed, canonical, sizeof(canonical)) != 0) {
         return -1;
     }
-    written = snprintf(
-        out, out_size,
-        "https://github.com/standtrain/jvman/releases/download/v%s/%s",
-        canonical, asset);
+    written = snprintf(out, out_size, "%s/v%s/%s", base, canonical, asset);
     return written < 0 || (size_t)written >= out_size ? -1 : 0;
 }
 
@@ -473,8 +530,100 @@ static int update_resolve_version(const char *requested, char *out,
     return result == 0 ? 0 : -3;
 }
 
-int jvman_update_command(int check_only, const char *requested_version) {
+/*
+ * Timed probe: measures how long platform_https_probe takes on the given URL.
+ * Returns 0 with *available=1 on success, 0 with *available=0 on unreachable
+ * (elapsed time still populated), or -1 if the monotonic clock is unavailable.
+ */
+static int update_probe_millis(const char *url, uint64_t *elapsed_out,
+                               int *available_out, char *error_out,
+                               size_t error_size) {
+    uint64_t started = 0;
+    uint64_t finished = 0;
+    int probe_result;
+    if (!url || !elapsed_out || !available_out) return -1;
+    *available_out = 0;
+    *elapsed_out = 0;
+    if (error_out && error_size) error_out[0] = '\0';
+    if (platform_monotonic_millis(&started) != 0) return -1;
+    platform_clear_error();
+    probe_result = platform_https_probe(url, JVMAN_UPDATE_PROBE_SIZE,
+                                        JVMAN_UPDATE_PROBE_TIMEOUT);
+    if (platform_monotonic_millis(&finished) != 0) return -1;
+    *elapsed_out = finished >= started ? finished - started : 0;
+    if (probe_result == 0) {
+        *available_out = 1;
+    } else if (error_out && error_size) {
+        const char *reason = platform_last_error();
+        if (!reason || !*reason) reason = "";
+        snprintf(error_out, error_size, "%s", reason);
+    }
+    return 0;
+}
+
+/*
+ * Select the fastest reachable mirror for the given (version, asset).
+ * When source is not AUTO, no probing is done and the mirror is returned
+ * directly. On AUTO, probes each mirror's asset URL and picks the smallest
+ * elapsed_millis; the SHA256SUMS URL is intentionally NOT used as the probe
+ * target because the file may be smaller than the probe sample size.
+ * Returns 0 with *selected_out set on success, -1 if no mirror is reachable.
+ */
+static int update_resolve_source(JvmanUpdateSource requested,
+                                 const char *version, const char *asset,
+                                 const JvmanUpdateSourceEntry **selected_out) {
+    size_t i;
+    const JvmanUpdateSourceEntry *best = NULL;
+    uint64_t best_elapsed = 0;
+    int printed_banner = 0;
+    *selected_out = NULL;
+    if (requested != JVMAN_UPDATE_SOURCE_AUTO) {
+        *selected_out = update_source_find(requested);
+        return *selected_out ? 0 : -1;
+    }
+    for (i = 0; i < update_source_count; ++i) {
+        const JvmanUpdateSourceEntry *entry = &update_sources[i];
+        char probe_url[JVMAN_UPDATE_URL_MAX];
+        char reason[256];
+        uint64_t elapsed = 0;
+        int available = 0;
+        if (jvman_update_build_release_url(entry->download_base, version,
+                                           asset, probe_url,
+                                           sizeof(probe_url)) != 0) {
+            continue;
+        }
+        if (!printed_banner) {
+            jvman_i18n_puts("Testing update mirrors...");
+            printed_banner = 1;
+        }
+        if (update_probe_millis(probe_url, &elapsed, &available, reason,
+                                sizeof(reason)) != 0) {
+            continue;
+        }
+        if (available) {
+            jvman_i18n_printf("  %-8s %" PRIu64 " ms\n", entry->name, elapsed);
+            if (!best || elapsed < best_elapsed) {
+                best = entry;
+                best_elapsed = elapsed;
+            }
+        } else {
+            jvman_i18n_printf("  %-8s %" PRIu64 " ms, unavailable (%s)\n",
+                              entry->name, elapsed,
+                              reason[0] ? reason
+                                        : jvman_i18n_text("unreachable"));
+        }
+    }
+    if (!best) return -1;
+    jvman_i18n_printf("Selected update mirror: %s (%" PRIu64 " ms)\n",
+                      best->name, best_elapsed);
+    *selected_out = best;
+    return 0;
+}
+
+int jvman_update_command(int check_only, const char *requested_version,
+                         JvmanUpdateSource source) {
     const char *asset = update_platform_asset();
+    const JvmanUpdateSourceEntry *mirror = NULL;
     JvmanUpdateVersion requested_parsed;
     char version[64];
     char checksums_url[JVMAN_UPDATE_URL_MAX];
@@ -542,11 +691,15 @@ int jvman_update_command(int check_only, const char *requested_version) {
         jvman_i18n_printf("jvman %s is already up to date.\n", JVMAN_VERSION);
         return 0;
     }
-    if (jvman_update_build_release_url(version, "SHA256SUMS", checksums_url,
+    if (update_resolve_source(source, version, asset, &mirror) != 0 || !mirror) {
+        return update_error("no update mirror is reachable");
+    }
+    if (jvman_update_build_release_url(mirror->download_base, version,
+                                       "SHA256SUMS", checksums_url,
                                        sizeof(checksums_url)) != 0 ||
-        jvman_update_build_release_url(version, asset, asset_url,
-                                       sizeof(asset_url)) != 0) {
-        return update_error("cannot construct the fixed GitHub release URL");
+        jvman_update_build_release_url(mirror->download_base, version, asset,
+                                       asset_url, sizeof(asset_url)) != 0) {
+        return update_error("cannot construct the fixed release URL");
     }
     if (update_download_text(checksums_url, JVMAN_UPDATE_CHECKSUM_LIMIT,
                              &checksums, &checksums_size) != 0) {
@@ -634,10 +787,12 @@ done:
 int jvman_update_run_cli(int argc, char **argv) {
     const char *version = NULL;
     int check_only = 0;
+    int source_set = 0;
+    JvmanUpdateSource source = JVMAN_UPDATE_SOURCE_AUTO;
     int index;
     if (argc < 2 || !argv || !argv[1] || strcmp(argv[1], "update") != 0) {
         return update_error(
-            "usage: jvman update [--check] [--version <version>]");
+            "usage: jvman update [--check] [--version <version>] [--source <name>|--source-list]");
     }
     for (index = 2; index < argc; ++index) {
         if (!argv[index]) return update_error("invalid null update argument");
@@ -654,10 +809,24 @@ int jvman_update_run_cli(int argc, char **argv) {
                     "update option --version requires one version");
             }
             version = argv[++index];
+        } else if (strcmp(argv[index], "--source") == 0) {
+            if (source_set || index + 1 >= argc || !argv[index + 1] ||
+                strncmp(argv[index + 1], "--", 2) == 0) {
+                return update_error(
+                    "update option --source requires one mirror name");
+            }
+            if (jvman_update_source_parse(argv[++index], &source) != 0) {
+                return update_error(
+                    "unknown update mirror; use `jvman update --source-list`");
+            }
+            source_set = 1;
+        } else if (strcmp(argv[index], "--source-list") == 0) {
+            jvman_update_source_list();
+            return 0;
         } else {
             return update_error(
-                "usage: jvman update [--check] [--version <version>]");
+                "usage: jvman update [--check] [--version <version>] [--source <name>|--source-list]");
         }
     }
-    return jvman_update_command(check_only, version);
+    return jvman_update_command(check_only, version, source);
 }

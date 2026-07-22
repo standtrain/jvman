@@ -247,35 +247,56 @@ static void test_release_urls(void) {
     size_t i;
 
     for (i = 0; i < sizeof(allowed_assets) / sizeof(allowed_assets[0]); ++i) {
-        CHECK(jvman_update_build_release_url("0.3.0", allowed_assets[i],
-                                             url, sizeof(url)) == 0);
+        CHECK(jvman_update_build_release_url(
+                  "https://github.com/standtrain/jvman/releases/download",
+                  "0.3.0", allowed_assets[i], url, sizeof(url)) == 0);
         CHECK(snprintf(expected, sizeof(expected),
                        "https://github.com/standtrain/jvman/releases/download/v0.3.0/%s",
                        allowed_assets[i]) > 0);
         CHECK(strcmp(url, expected) == 0);
     }
 
-    CHECK(jvman_update_build_release_url("v0.3.0", "SHA256SUMS", url,
-                                         sizeof(url)) == 0);
+    CHECK(jvman_update_build_release_url(
+              "https://github.com/standtrain/jvman/releases/download",
+              "v0.3.0", "SHA256SUMS", url, sizeof(url)) == 0);
     CHECK(strcmp(url,
                  "https://github.com/standtrain/jvman/releases/download/v0.3.0/SHA256SUMS") == 0);
 
+    /* Gitee mirror base yields the same layout under a different host. */
+    CHECK(jvman_update_build_release_url(
+              "https://gitee.com/zzpdhc/jvman/releases/download",
+              "0.3.0", "SHA256SUMS", url, sizeof(url)) == 0);
+    CHECK(strcmp(url,
+                 "https://gitee.com/zzpdhc/jvman/releases/download/v0.3.0/SHA256SUMS") == 0);
+
     for (i = 0; i < sizeof(rejected_assets) / sizeof(rejected_assets[0]); ++i) {
-        CHECK(jvman_update_build_release_url("0.3.0", rejected_assets[i],
-                                             url, sizeof(url)) != 0);
+        CHECK(jvman_update_build_release_url(
+                  "https://github.com/standtrain/jvman/releases/download",
+                  "0.3.0", rejected_assets[i], url, sizeof(url)) != 0);
     }
-    CHECK(jvman_update_build_release_url("1.2.3/other", "SHA256SUMS", url,
+    CHECK(jvman_update_build_release_url(
+              "https://github.com/standtrain/jvman/releases/download",
+              "1.2.3/other", "SHA256SUMS", url, sizeof(url)) != 0);
+    CHECK(jvman_update_build_release_url(
+              "https://github.com/standtrain/jvman/releases/download",
+              "1.2.3?x=1", "SHA256SUMS", url, sizeof(url)) != 0);
+    CHECK(jvman_update_build_release_url(
+              "https://github.com/standtrain/jvman/releases/download",
+              "01.2.3", "SHA256SUMS", url, sizeof(url)) != 0);
+    CHECK(jvman_update_build_release_url(
+              "https://github.com/standtrain/jvman/releases/download",
+              "1.2.3", "SHA256SUMS", url, 8) != 0);
+    CHECK(jvman_update_build_release_url(
+              "https://github.com/standtrain/jvman/releases/download",
+              NULL, "SHA256SUMS", url, sizeof(url)) != 0);
+    CHECK(jvman_update_build_release_url(
+              "https://github.com/standtrain/jvman/releases/download",
+              "1.2.3", NULL, url, sizeof(url)) != 0);
+    CHECK(jvman_update_build_release_url(
+              "https://github.com/standtrain/jvman/releases/download",
+              "1.2.3", "SHA256SUMS", NULL, 0) != 0);
+    CHECK(jvman_update_build_release_url(NULL, "1.2.3", "SHA256SUMS", url,
                                          sizeof(url)) != 0);
-    CHECK(jvman_update_build_release_url("1.2.3?x=1", "SHA256SUMS", url,
-                                         sizeof(url)) != 0);
-    CHECK(jvman_update_build_release_url("01.2.3", "SHA256SUMS", url,
-                                         sizeof(url)) != 0);
-    CHECK(jvman_update_build_release_url("1.2.3", "SHA256SUMS", url, 8) != 0);
-    CHECK(jvman_update_build_release_url(NULL, "SHA256SUMS", url,
-                                         sizeof(url)) != 0);
-    CHECK(jvman_update_build_release_url("1.2.3", NULL, url,
-                                         sizeof(url)) != 0);
-    CHECK(jvman_update_build_release_url("1.2.3", "SHA256SUMS", NULL, 0) != 0);
 
     check_platform_asset("windows", "x64", "jvman-windows-x86_64.exe");
     check_platform_asset("linux", "x64", "jvman-linux-x86_64");

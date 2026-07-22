@@ -60,7 +60,8 @@ jvman exec <name> [--] <cmd> [args...]   run with selected JDK, no global change
 jvman init [powershell|cmd|sh]           emit shell-specific env script
 jvman discover [--register]              scan system for JDKs
 jvman doctor                             validate JAVA_HOME/PATH/tools
-jvman update [--check] [--version <v>]   self-update from GitHub releases
+jvman update [--check] [--version <v>] [--source <name>|--source-list]
+                                          self-update; --source picks a mirror (auto/github/gitee)
 jvman source [--list|--reset|<name>|add <n> <tmpl>|remove <n>]
 jvman language [--list|en|zh-CN]
 jvman home                               print data-home
@@ -208,10 +209,26 @@ for PowerShell; a per-user CMD `AutoRun` with **doubled** percent signs
 ## Update
 
 ```text
-jvman update --check          # verify, don't download
-jvman update                  # latest stable from github.com/standtrain/jvman
-jvman update --version 0.3.0  # explicit, no downgrade
+jvman update --check                     # verify, don't download
+jvman update                             # latest stable, auto-pick fastest mirror
+jvman update --version 0.4.0             # explicit, no downgrade
+jvman update --source gitee              # pin the mirror (github|gitee|auto)
+jvman update --source-list               # list mirrors
 ```
+
+- **Version metadata** always comes from `api.github.com/repos/standtrain/jvman/releases/latest`
+  — that's the single source of truth for the "latest" tag.
+- **Asset download** (SHA256SUMS + the platform binary) can come from any
+  configured mirror. Built-in mirrors:
+  - `github` → `https://github.com/standtrain/jvman/releases/download`
+  - `gitee`  → `https://gitee.com/zzpdhc/jvman/releases/download` (China-friendly)
+- **`--source auto`** (default) probes both mirrors' asset URL with a
+  bounded 64 KiB range request, then downloads once from the fastest.
+  Failed probes are announced; download is not retried on a different
+  mirror if the picked one later fails — same policy as `install`.
+- The Gitee mirror must have a Release tagged **exactly** `v<major.minor.patch>`
+  with the same asset filenames and matching SHA-256 as the GitHub release,
+  otherwise the SHA-256 verification step in `update` will reject the binary.
 
 - HTTPS only; metadata and binary size capped.
 - Binary must match the release's `SHA256SUMS` **and** the PE/ELF/Mach-O
