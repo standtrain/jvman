@@ -124,18 +124,29 @@ static int installer_message_box(const wchar_t *message,
 }
 
 static void installer_uninstall_scope_dialog_refresh(HWND dialog) {
+    HWND combo;
+    int current_sel;
     if (!dialog) return;
     SetWindowTextW(dialog, jvman_lang_str(JVMAN_STR_APP_TITLE));
     SetDlgItemTextW(dialog, IDC_JVMAN_UNINSTALL_SCOPE_PROMPT,
                     jvman_lang_str(JVMAN_STR_UNINSTALL_CONFIRM));
-    SetDlgItemTextW(dialog, IDC_JVMAN_UNINSTALL_PROGRAM_ONLY,
-                    jvman_lang_str(JVMAN_STR_UNINSTALL_SCOPE_PROGRAM_ONLY));
-    SetDlgItemTextW(dialog, IDC_JVMAN_UNINSTALL_DATA,
-                    jvman_lang_str(JVMAN_STR_UNINSTALL_SCOPE_DATA));
-    SetDlgItemTextW(dialog, IDC_JVMAN_UNINSTALL_ALL,
-                    jvman_lang_str(JVMAN_STR_UNINSTALL_SCOPE_ALL));
     SetDlgItemTextW(dialog, IDOK, jvman_lang_str(JVMAN_STR_CONFIRM));
     SetDlgItemTextW(dialog, IDCANCEL, jvman_lang_str(JVMAN_STR_CANCEL));
+    combo = GetDlgItem(dialog, IDC_JVMAN_UNINSTALL_SCOPE_COMBO);
+    if (!combo) return;
+    current_sel = (int)SendMessageW(combo, CB_GETCURSEL, 0, 0);
+    SendMessageW(combo, CB_RESETCONTENT, 0, 0);
+    SendMessageW(combo, CB_ADDSTRING, 0,
+                 (LPARAM)jvman_lang_str(JVMAN_STR_UNINSTALL_SCOPE_PROGRAM_ONLY));
+    SendMessageW(combo, CB_ADDSTRING, 0,
+                 (LPARAM)jvman_lang_str(JVMAN_STR_UNINSTALL_SCOPE_DATA));
+    SendMessageW(combo, CB_ADDSTRING, 0,
+                 (LPARAM)jvman_lang_str(JVMAN_STR_UNINSTALL_SCOPE_ALL));
+    if (current_sel >= 0 && current_sel < 3) {
+        SendMessageW(combo, CB_SETCURSEL, (WPARAM)current_sel, 0);
+    } else {
+        SendMessageW(combo, CB_SETCURSEL, 0, 0);
+    }
 }
 
 static INT_PTR CALLBACK installer_uninstall_scope_dialog_proc(
@@ -144,33 +155,33 @@ static INT_PTR CALLBACK installer_uninstall_scope_dialog_proc(
         dialog, DWLP_USER);
     switch (message) {
         case WM_INITDIALOG: {
-            int selected = IDC_JVMAN_UNINSTALL_PROGRAM_ONLY;
+            int selected = 0;
             options = (InstallerOptions *)lparam;
             if (!options) {
                 EndDialog(dialog, -1);
                 return TRUE;
             }
             SetWindowLongPtrW(dialog, DWLP_USER, (LONG_PTR)options);
-            if (options->remove_jdks) selected = IDC_JVMAN_UNINSTALL_ALL;
-            else if (options->remove_data) selected = IDC_JVMAN_UNINSTALL_DATA;
-            CheckRadioButton(
-                dialog, IDC_JVMAN_UNINSTALL_PROGRAM_ONLY,
-                IDC_JVMAN_UNINSTALL_ALL, selected);
+            if (options->remove_jdks) selected = 2;
+            else if (options->remove_data) selected = 1;
+            else selected = 0;
             installer_uninstall_scope_dialog_refresh(dialog);
+            SendDlgItemMessageW(dialog, IDC_JVMAN_UNINSTALL_SCOPE_COMBO,
+                                 CB_SETCURSEL, (WPARAM)selected, 0);
             return TRUE;
         }
-        case WM_COMMAND:
+        case WM_COMMAND: {
+            HWND combo;
+            int sel;
             if (LOWORD(wparam) == IDOK) {
                 if (!options) {
                     EndDialog(dialog, -1);
                     return TRUE;
                 }
-                options->remove_jdks =
-                    IsDlgButtonChecked(dialog, IDC_JVMAN_UNINSTALL_ALL) ==
-                    BST_CHECKED;
-                options->remove_data = options->remove_jdks ||
-                    IsDlgButtonChecked(dialog, IDC_JVMAN_UNINSTALL_DATA) ==
-                        BST_CHECKED;
+                combo = GetDlgItem(dialog, IDC_JVMAN_UNINSTALL_SCOPE_COMBO);
+                sel = combo ? (int)SendMessageW(combo, CB_GETCURSEL, 0, 0) : 0;
+                options->remove_jdks = (sel == 2);
+                options->remove_data = (sel >= 1);
                 options->uninstall_scope_set = 1;
                 EndDialog(dialog, IDOK);
                 return TRUE;
@@ -180,6 +191,7 @@ static INT_PTR CALLBACK installer_uninstall_scope_dialog_proc(
                 return TRUE;
             }
             break;
+        }
         case WM_CLOSE:
             EndDialog(dialog, IDCANCEL);
             return TRUE;
@@ -3586,6 +3598,10 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous,
     }
     if ((options.machine_mode || options.legacy_cleanup_only) &&
         !installer_process_is_elevated()) {
+        HWND progress = NULL;
+        if (options.uninstall) {
+            progress = installer_show_progress_window(options.silent, 1);
+        }
         result = installer_run_elevated_machine(
             &options, &instance_mutex, &elevation_cancelled,
             &elevation_launched, &legacy_cleanup_completed,
@@ -3721,6 +3737,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous,
             }
             goto done;
         }
+        installer_close_progress_window(progress);
     }
     if (options.machine_mode ||
         (options.legacy_cleanup_flags != 0u &&
